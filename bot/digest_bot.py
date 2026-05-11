@@ -13,6 +13,9 @@ def start_digest_bot(config: Config, run_digest_callback) -> None:
     app = ApplicationBuilder().token(config.bot_token).build()
 
     async def digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if config.admin_id and update.effective_user.id != config.admin_id:
+            return
+
         await update.message.reply_text("⏳ Генерирую дайджест...")
         try:
             await run_digest_callback()

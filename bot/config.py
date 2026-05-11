@@ -17,6 +17,7 @@ class Config:
     lookback_hours: int
     session_name: str
     bot_token: str | None
+    admin_id: int | None
     alerts_enabled: bool
 
     @classmethod
@@ -49,6 +50,7 @@ class Config:
             lookback_hours=int(os.getenv("LOOKBACK_HOURS", "24")),
             session_name=os.getenv("SESSION_NAME", "userbot"),
             bot_token=os.getenv("BOT_TOKEN"),
+            admin_id=int(admin) if (admin := os.getenv("ADMIN_ID")) else None,
             alerts_enabled=os.getenv("ALERTS_ENABLED", "false").lower() == "true",
         )
 
