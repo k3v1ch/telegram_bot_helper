@@ -14,12 +14,14 @@ from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
     CommandHandler,
+    ConversationHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
 
 from bot.config import Config
+from bot.digest_store import search_digests
 from bot.state import BotState
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 MSK = timezone(timedelta(hours=3))
 
 CB_BACK = "back"
+SEARCH_WAITING = 1
 
 PERIOD_BUTTONS = {
     "⏱ 1 час": 1,
@@ -39,6 +42,7 @@ REPLY_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["⏱ 1 час", "⏱ 5 часов"],
         ["⏱ 12 часов", "⏱ 24 часа"],
+        ["📅 За неделю", "🔎 Поиск"],
         ["📊 Статус", "⚡ Алерты"],
     ],
     resize_keyboard=True,
@@ -74,6 +78,67 @@ def build_bot_app(config: Config, state: BotState, run_digest_callback) -> Appli
         except Exception as e:
             logger.exception(f"Digest via '{label}' button failed")
             await update.message.reply_text(f"❌ Ошибка: {e}")
+
+    async def weekly_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_user.id != config.admin_user_id:
+            await update.message.reply_text("⛔ Доступ запрещён", reply_markup=ReplyKeyboardRemove())
+            return
+
+        await update.message.reply_text("⏳ Генерирую еженедельный дайджест за 7 дней...")
+
+        try:
+            count = await run_digest_callback(lookback_hours=168, weekly=True)
+            now = datetime.now(MSK).strftime("%H:%M")
+            await update.message.reply_text(f"✅ Еженедельный дайджест отправлен • {count} сообщений • {now} МСК")
+        except Exception as e:
+            logger.exception("Weekly digest button failed")
+            await update.message.reply_text(f"❌ Ошибка: {e}")
+
+    async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        if update.effective_user.id != config.admin_user_id:
+            await update.message.reply_text("⛔ Доступ запрещён", reply_markup=ReplyKeyboardRemove())
+            return ConversationHandler.END
+
+        await update.message.reply_text("🔎 Введите слово для поиска по дайджестам:")
+        return SEARCH_WAITING
+
+    async def search_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        if update.effective_user.id != config.admin_user_id:
+            return ConversationHandler.END
+
+        keyword = update.message.text.strip()
+        if not keyword:
+            await update.message.reply_text("❌ Пустой запрос", reply_markup=REPLY_KEYBOARD)
+            return ConversationHandler.END
+
+        results = search_digests(config.data_dir, keyword)
+
+        if not results:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("← Назад", callback_data=CB_BACK)],
+            ])
+            await update.message.reply_text(
+                f"❌ Ничего не найдено по запросу «{keyword}»",
+                reply_markup=keyboard,
+            )
+            return ConversationHandler.END
+
+        lines = [f'🔎 Результаты по запросу: «{keyword}»\n']
+        for r in results:
+            lines.append(f"📅 {r['date_formatted']} ({r['period']}):")
+            for line in r["lines"]:
+                lines.append(f"  {line}")
+            lines.append("")
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("← Назад", callback_data=CB_BACK)],
+        ])
+        await update.message.reply_text("\n".join(lines), reply_markup=keyboard)
+        return ConversationHandler.END
+
+    async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        await update.message.reply_text("📋 Управление • Дайджест Bedolaga", reply_markup=REPLY_KEYBOARD)
+        return ConversationHandler.END
 
     async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user.id != config.admin_user_id:
@@ -117,8 +182,18 @@ def build_bot_app(config: Config, state: BotState, run_digest_callback) -> Appli
         if query.data == CB_BACK:
             await query.edit_message_text("📋 Управление • Дайджест Bedolaga")
 
+    search_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.TEXT & filters.Regex("^🔎 Поиск$"), search_start)],
+        states={
+            SEARCH_WAITING: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_query)],
+        },
+        fallbacks=[CommandHandler("cancel", search_cancel)],
+    )
+
     app.add_handler(CommandHandler(["start", "menu"], start_command))
+    app.add_handler(search_conv)
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^⏱"), period_handler))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^📅 За неделю$"), weekly_handler))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^📊 Статус$"), status_handler))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^⚡ Алерты$"), alerts_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from telegram import Bot
 
 from bot.config import Config
+from bot.digest_store import save_digest
 from bot.stats import get_yesterday_count
 
 logger = logging.getLogger(__name__)
@@ -27,20 +28,32 @@ def _build_header(
     total_fetched: int | None = None,
     after_stage1: int | None = None,
     after_stage2: int | None = None,
+    pinned_preview: str | None = None,
+    weekly: bool = False,
 ) -> str:
     now = datetime.now(MSK)
     date_str = f"{now.day} {MONTHS_RU[now.month]} {now.year}"
 
-    lines = [
-        f"📋 Дайджест • {source_chat_name}",
-        f"📅 {date_str} • {start_time} – {end_time} МСК",
-        f"💬 Проанализировано сообщений: {message_count}",
-    ]
+    if weekly:
+        week_ago = now - timedelta(days=7)
+        date_from = f"{week_ago.day} {MONTHS_RU[week_ago.month]}"
+        date_to = f"{now.day} {MONTHS_RU[now.month]} {now.year}"
+        lines = [
+            f"📋 Еженедельный дайджест • {source_chat_name}",
+            f"📅 {date_from} – {date_to}",
+            f"💬 Проанализировано сообщений: {message_count}",
+        ]
+    else:
+        lines = [
+            f"📋 Дайджест • {source_chat_name}",
+            f"📅 {date_str} • {start_time} – {end_time} МСК",
+            f"💬 Проанализировано сообщений: {message_count}",
+        ]
 
     if total_fetched is not None and after_stage1 is not None and after_stage2 is not None:
         lines.append(f"🔍 Обработано: {total_fetched} → {after_stage1} → {after_stage2} сообщений")
 
-    if yesterday_count is not None:
+    if not weekly and yesterday_count is not None:
         diff = message_count - yesterday_count
         if diff > 0:
             arrow = f"▲ +{diff}"
@@ -51,6 +64,10 @@ def _build_header(
         lines.append(f"📊 Вчера: {yesterday_count} → сегодня: {message_count} ({arrow})")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+
+    if pinned_preview:
+        lines.append(f"📌 Закреп обновлён: {pinned_preview}")
+
     return "\n".join(lines) + "\n\n"
 
 
@@ -65,11 +82,14 @@ async def send_digest(
     total_fetched: int | None = None,
     after_stage1: int | None = None,
     after_stage2: int | None = None,
+    pinned_preview: str | None = None,
+    weekly: bool = False,
+    period: str = "24h",
 ) -> None:
     yesterday_count = get_yesterday_count(config.data_dir)
     header = _build_header(
         source_chat_name, message_count, start_time, end_time, yesterday_count,
-        total_fetched, after_stage1, after_stage2,
+        total_fetched, after_stage1, after_stage2, pinned_preview, weekly,
     )
     full_text = header + digest_text
 
@@ -81,6 +101,7 @@ async def send_digest(
             message_thread_id=config.dest_topic_id,
         )
 
+    save_digest(config.data_dir, digest_text, message_count, period)
     logger.info(f"Digest sent to destination ({len(chunks)} message(s))")
 
 

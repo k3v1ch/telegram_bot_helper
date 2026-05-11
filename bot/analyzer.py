@@ -45,6 +45,10 @@ FINAL_PROMPT = """\
 - Если несколько сообщений об одном событии — объедини в один пункт
 
 ФОРМАТ:
+Перед всеми секциями выведи одну строку — краткое резюме всего дня:
+📌 Резюме: [одно предложение максимум 150 символов, самое главное за день]
+Пустую строку после резюме, затем секции.
+
 ## 🔴 Критично
 (IP выведены из БС, массовые блокировки, сервисы упали)
 
@@ -55,6 +59,36 @@ FINAL_PROMPT = """\
 (рабочие решения, технические выводы, конкретные рекомендации)
 
 Секцию пропускай если в ней нечего писать. Никаких общих фраз."""
+
+WEEKLY_PROMPT = """\
+Ты анализируешь уже отфильтрованный лог чата VPN-операторов.
+Это ЕЖЕНЕДЕЛЬНЫЙ дайджест за 7 дней.
+
+КОНТЕКСТ:
+- БС / белый список — список IP российских провайдеров через которые работают \
+Яндекс, ВКонтакте, Wildberries, Ozon и другие российские сервисы через VPN
+- "Выведен из БС" — IP удалён из белого списка, серверы перестают работать. КРИТИЧНО.
+- "Добавлен в БС" — IP добавлен в белый список. Хорошая новость.
+- Провайдеры: Selectel, Рег.ру, Hetzner, AEZA, Beget, TimeWeb, RuVDS, Яндекс.Облако
+
+Выдели только самые значимые события недели — максимум 10 пунктов.
+Группируй похожие события вместе.
+Никнеймы не упоминай, пиши безлично.
+Не выдумывай факты которых нет в тексте.
+
+ФОРМАТ:
+📌 Резюме: [одно предложение, самое главное за неделю]
+
+## 🔴 Критично
+(IP выведены из БС, массовые блокировки, сервисы упали)
+
+## 🟡 Обновления
+(изменения у провайдеров, лимиты, цены, новые факты об IP-диапазонах)
+
+## 🔵 Полезно
+(рабочие решения, технические выводы, конкретные рекомендации)
+
+Секцию пропускай если в ней нечего писать. Только самое важное."""
 
 MAX_BLOCK_CHARS = 6000
 MAX_BLOCKS = 6
@@ -134,7 +168,7 @@ def _count_lines(text: str) -> int:
     return len([line for line in text.strip().split("\n") if line.strip()])
 
 
-async def analyze_messages(messages: list[dict], config: Config) -> AnalysisResult:
+async def analyze_messages(messages: list[dict], config: Config, weekly: bool = False) -> AnalysisResult:
     blocks = {label: msgs for label, msgs in _split_into_blocks(messages).items() if msgs}
 
     if not blocks:
@@ -210,7 +244,8 @@ async def analyze_messages(messages: list[dict], config: Config) -> AnalysisResu
 
     # --- Stage 3: Final analysis ---
     combined = "\n\n".join(filtered_lines)
-    logger.info(f"Stage 3: {len(combined)} chars of filtered content")
+    stage3_prompt = WEEKLY_PROMPT if weekly else FINAL_PROMPT
+    logger.info(f"Stage 3: {len(combined)} chars of filtered content (weekly={weekly})")
 
     await asyncio.sleep(STAGE3_DELAY)
 
@@ -220,7 +255,7 @@ async def analyze_messages(messages: list[dict], config: Config) -> AnalysisResu
             max_tokens=1500,
             temperature=0.3,
             messages=[
-                {"role": "system", "content": FINAL_PROMPT},
+                {"role": "system", "content": stage3_prompt},
                 {"role": "user", "content": f"Проанализируй следующие отфильтрованные сообщения и составь дайджест:\n\n{combined}"},
             ],
         )

@@ -15,6 +15,7 @@ from bot.alerter import Alerter
 from bot.analyzer import analyze_messages
 from bot.config import Config
 from bot.digest_bot import build_bot_app
+from bot.pinned import check_pinned_update
 from bot.reader import fetch_messages
 from bot.sender import send_digest, send_empty_notice, send_error
 from bot.state import BotState
@@ -63,9 +64,13 @@ def create_userbot(config: Config) -> TelegramClient:
     )
 
 
-async def run_digest(userbot: TelegramClient, bot: Bot, config: Config, state: BotState, lookback_hours: int | None = None) -> int:
+async def run_digest(
+    userbot: TelegramClient, bot: Bot, config: Config, state: BotState,
+    lookback_hours: int | None = None, weekly: bool = False,
+) -> int:
     hours = lookback_hours if lookback_hours is not None else config.lookback_hours
-    logger.info(f"Starting digest generation (lookback={hours}h)")
+    label = "weekly" if weekly else "daily"
+    logger.info(f"Starting {label} digest generation (lookback={hours}h)")
 
     try:
         fetch_result = await fetch_messages(userbot, config, lookback_hours=lookback_hours)
@@ -85,7 +90,9 @@ async def run_digest(userbot: TelegramClient, bot: Bot, config: Config, state: B
         start_time = messages[0]["time"]
         end_time = messages[-1]["time"]
 
-        analysis = await analyze_messages(messages, config)
+        pinned_preview = await check_pinned_update(userbot, config)
+
+        analysis = await analyze_messages(messages, config, weekly=weekly)
 
         logger.info(
             f"Pipeline: {fetch_result.total_fetched} fetched → "
@@ -93,11 +100,27 @@ async def run_digest(userbot: TelegramClient, bot: Bot, config: Config, state: B
             f"{analysis.after_stage2} after S2"
         )
 
+        if hours <= 1:
+            period = "1h"
+        elif hours <= 5:
+            period = "5h"
+        elif hours <= 12:
+            period = "12h"
+        elif hours <= 24:
+            period = "24h"
+        elif weekly:
+            period = "7d"
+        else:
+            period = f"{hours}h"
+
         await send_digest(
             bot, config, analysis.text, count, source_name, start_time, end_time,
             total_fetched=fetch_result.total_fetched,
             after_stage1=fetch_result.after_stage1,
             after_stage2=analysis.after_stage2,
+            pinned_preview=pinned_preview,
+            weekly=weekly,
+            period=period,
         )
 
         return count
@@ -171,17 +194,30 @@ async def main() -> None:
             pass
         _update_next_run(scheduler, state)
 
+    async def scheduled_weekly():
+        try:
+            await run_digest(userbot, bot, config, state, lookback_hours=168, weekly=True)
+        except Exception:
+            pass
+
     scheduler.add_job(
         scheduled_digest,
         CronTrigger(hour=config.digest_hour, minute=config.digest_minute, timezone=MSK),
         id="digest_job",
     )
+
+    scheduler.add_job(
+        scheduled_weekly,
+        CronTrigger(day_of_week=config.weekly_digest_day, hour=5, minute=0, timezone=MSK),
+        id="weekly_job",
+    )
+
     scheduler.start()
     _update_next_run(scheduler, state)
-    logger.info(f"Scheduler started, digest at {config.digest_time} MSK daily")
+    logger.info(f"Scheduler started, digest at {config.digest_time} MSK daily, weekly on {config.weekly_digest_day}")
 
-    async def digest_callback(lookback_hours: int | None = None) -> int:
-        count = await run_digest(userbot, bot, config, state, lookback_hours=lookback_hours)
+    async def digest_callback(lookback_hours: int | None = None, weekly: bool = False) -> int:
+        count = await run_digest(userbot, bot, config, state, lookback_hours=lookback_hours, weekly=weekly)
         _update_next_run(scheduler, state)
         return count
 

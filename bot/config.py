@@ -19,6 +19,7 @@ class Config:
     lookback_hours: int
     session_name: str
     alerts_enabled_default: bool
+    weekly_digest_day: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -52,6 +53,7 @@ class Config:
             lookback_hours=int(os.getenv("LOOKBACK_HOURS", "24")),
             session_name=os.getenv("SESSION_NAME", "userbot"),
             alerts_enabled_default=os.getenv("ALERTS_ENABLED", "true").lower() == "true",
+            weekly_digest_day=os.getenv("WEEKLY_DIGEST_DAY", "mon").lower()[:3],
         )
 
     @property
