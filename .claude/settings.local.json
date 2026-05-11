@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(New-Item -ItemType Directory -Path \"bot\" -Force)",
+      "PowerShell(Get-ChildItem -Recurse -File | Select-Object -ExpandProperty FullName | ForEach-Object { $_.Replace\\(\"C:\\\\Users\\\\viplu\\\\Documents\\\\GitHub\\\\telegram_bot_helper\\\\\", \"\"\\) })"
+    ]
+  }
+}

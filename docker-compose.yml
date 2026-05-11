@@ -1,0 +1,10 @@
+services:
+  digest:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./sessions:/app/sessions
+      - ./logs:/app/logs
+    stdin_open: true
+    tty: true
