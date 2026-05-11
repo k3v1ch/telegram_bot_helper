@@ -11,8 +11,9 @@ logger = logging.getLogger(__name__)
 MSK = timezone(timedelta(hours=3))
 
 
-async def fetch_messages(client: TelegramClient, config: Config) -> list[dict]:
-    cutoff = datetime.now(MSK) - timedelta(hours=config.lookback_hours)
+async def fetch_messages(client: TelegramClient, config: Config, lookback_hours: int | None = None) -> list[dict]:
+    hours = lookback_hours if lookback_hours is not None else config.lookback_hours
+    cutoff = datetime.now(MSK) - timedelta(hours=hours)
     messages = []
 
     entity = await client.get_entity(config.source_chat_id)

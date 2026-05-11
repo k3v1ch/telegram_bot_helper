@@ -63,11 +63,12 @@ def create_userbot(config: Config) -> TelegramClient:
     )
 
 
-async def run_digest(userbot: TelegramClient, bot: Bot, config: Config, state: BotState) -> int:
-    logger.info("Starting digest generation")
+async def run_digest(userbot: TelegramClient, bot: Bot, config: Config, state: BotState, lookback_hours: int | None = None) -> int:
+    hours = lookback_hours if lookback_hours is not None else config.lookback_hours
+    logger.info(f"Starting digest generation (lookback={hours}h)")
 
     try:
-        messages = await fetch_messages(userbot, config)
+        messages = await fetch_messages(userbot, config, lookback_hours=lookback_hours)
         count = len(messages)
 
         save_today_count(config.data_dir, count)
@@ -166,8 +167,8 @@ async def main() -> None:
     _update_next_run(scheduler, state)
     logger.info(f"Scheduler started, digest at {config.digest_time} MSK daily")
 
-    async def digest_callback() -> int:
-        count = await run_digest(userbot, bot, config, state)
+    async def digest_callback(lookback_hours: int | None = None) -> int:
+        count = await run_digest(userbot, bot, config, state, lookback_hours=lookback_hours)
         _update_next_run(scheduler, state)
         return count
 
