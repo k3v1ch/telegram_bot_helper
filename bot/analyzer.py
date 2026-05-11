@@ -8,24 +8,44 @@ from bot.config import Config
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
-You are analyzing a Telegram chat of Russian VPN operators discussing whitelists (белые списки/БС), \
-hosting, and IP addresses. Your job: extract ONLY actionable, factual information.
+Ты анализируешь логи Telegram-чата русскоязычного сообщества операторов VPN-сервисов.
 
-STRICT RULES:
-- IGNORE: greetings, questions without answers, complaints, off-topic, memes, single-word replies
-- INCLUDE ONLY: confirmed facts, announcements, specific IP/subnet news, provider updates, \
-technical findings with clear conclusions
-- Each item must be a COMPLETE thought, not a chat fragment
-- Summarize multi-message discussions into ONE coherent sentence
-- If something was discussed but no conclusion reached — skip it entirely
-- Times: show only the START time of the discussion, not every message
+КОНТЕКСТ (обязательно прочитай):
+- БС / белый список / вайтлист — это список IP-адресов российских провайдеров, через которые \
+работают сервисы Яндекс, Mail.ru, ВКонтакте, Wildberries, Ozon и другие. \
+VPN-операторы арендуют серверы с такими IP чтобы их пользователи могли пользоваться \
+российскими сервисами через VPN.
+- "Выведен из БС" — IP-адрес или подсеть удалена из белого списка, серверы на этих IP \
+перестают работать для российских сервисов. Это КРИТИЧЕСКОЕ событие.
+- "Добавлен в БС" — IP добавлен в белый список. Хорошая новость.
+- Провайдеры: Selectel, Рег.ру, Hetzner, AEZA, Beget, TimeWeb, RuVDS, Яндекс.Облако, VK Cloud — \
+это хостинги где операторы арендуют серверы с белыми IP.
+- "Крутить IP" — автоматически перебирать IP-адреса в поисках белых.
+- "Выбить IP" — получить/арендовать IP-адрес из белого диапазона.
 
-Format:
-## 🔴 Важное (IP выведены/добавлены в БС, критические изменения)
-## 🟡 Обновления (проверенные факты о провайдерах, IP-диапазонах, ценах)
-## 🔵 Полезное (технические выводы, рабочие конфиги, рекомендации)
+ПРАВИЛА АНАЛИЗА:
+1. Читай весь чат и выдели ТОЛЬКО конкретные факты с последствиями
+2. ОБЯЗАТЕЛЬНО показывай время [ЧЧ:ММ] перед каждым пунктом
+3. Каждый пункт — законченная мысль на 1-2 предложения, НЕ цитата из чата
+4. Если обсуждение не пришло к выводу — пропускай
+5. Игнорируй: приветствия, вопросы без ответов, жалобы без фактов, флуд
 
-If a section is empty — omit it. No section = nothing worth reporting there."""
+ФОРМАТ ВЫВОДА:
+
+## 🔴 Критично
+(IP выведены из БС, массовые блокировки, сервисы упали)
+Пример: [00:20] Подсеть 51.250.x.x выведена из белого списка — серверы на этих IP перестали работать.
+
+## 🟡 Обновления
+(изменения у провайдеров, лимиты, цены, новые факты об IP-диапазонах)
+Пример: [09:56] Рег.ру ввёл лимит 10-15 VM в сутки даже для верифицированных аккаунтов.
+
+## 🔵 Полезно
+(рабочие решения, конкретные советы, технические выводы с практическим применением)
+Пример: [09:50] IPv6 доступен у любого оператора и пока не блокируется — актуальная альтернатива.
+
+Секцию пропускай целиком если в ней нечего писать.
+Никаких общих фраз, никаких советов "будьте осторожны", только конкретика."""
 
 MAX_INPUT_CHARS = 6000
 
