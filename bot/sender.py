@@ -24,6 +24,9 @@ def _build_header(
     start_time: str,
     end_time: str,
     yesterday_count: int | None,
+    total_fetched: int | None = None,
+    after_stage1: int | None = None,
+    after_stage2: int | None = None,
 ) -> str:
     now = datetime.now(MSK)
     date_str = f"{now.day} {MONTHS_RU[now.month]} {now.year}"
@@ -33,6 +36,9 @@ def _build_header(
         f"📅 {date_str} • {start_time} – {end_time} МСК",
         f"💬 Проанализировано сообщений: {message_count}",
     ]
+
+    if total_fetched is not None and after_stage1 is not None and after_stage2 is not None:
+        lines.append(f"🔍 Обработано: {total_fetched} → {after_stage1} → {after_stage2} сообщений")
 
     if yesterday_count is not None:
         diff = message_count - yesterday_count
@@ -56,9 +62,15 @@ async def send_digest(
     source_chat_name: str,
     start_time: str,
     end_time: str,
+    total_fetched: int | None = None,
+    after_stage1: int | None = None,
+    after_stage2: int | None = None,
 ) -> None:
     yesterday_count = get_yesterday_count(config.data_dir)
-    header = _build_header(source_chat_name, message_count, start_time, end_time, yesterday_count)
+    header = _build_header(
+        source_chat_name, message_count, start_time, end_time, yesterday_count,
+        total_fetched, after_stage1, after_stage2,
+    )
     full_text = header + digest_text
 
     chunks = _split_message(full_text)

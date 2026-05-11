@@ -68,7 +68,8 @@ async def run_digest(userbot: TelegramClient, bot: Bot, config: Config, state: B
     logger.info(f"Starting digest generation (lookback={hours}h)")
 
     try:
-        messages = await fetch_messages(userbot, config, lookback_hours=lookback_hours)
+        fetch_result = await fetch_messages(userbot, config, lookback_hours=lookback_hours)
+        messages = fetch_result.messages
         count = len(messages)
 
         save_today_count(config.data_dir, count)
@@ -84,8 +85,20 @@ async def run_digest(userbot: TelegramClient, bot: Bot, config: Config, state: B
         start_time = messages[0]["time"]
         end_time = messages[-1]["time"]
 
-        digest_text = await analyze_messages(messages, config)
-        await send_digest(bot, config, digest_text, count, source_name, start_time, end_time)
+        analysis = await analyze_messages(messages, config)
+
+        logger.info(
+            f"Pipeline: {fetch_result.total_fetched} fetched → "
+            f"{fetch_result.after_stage1} after S1 → "
+            f"{analysis.after_stage2} after S2"
+        )
+
+        await send_digest(
+            bot, config, analysis.text, count, source_name, start_time, end_time,
+            total_fetched=fetch_result.total_fetched,
+            after_stage1=fetch_result.after_stage1,
+            after_stage2=analysis.after_stage2,
+        )
 
         return count
 
