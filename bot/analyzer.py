@@ -1,5 +1,5 @@
+import asyncio
 import logging
-import re
 
 from groq import AsyncGroq
 
@@ -7,7 +7,15 @@ from bot.config import Config
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """\
+BLOCK_PROMPT = """\
+Ты анализируешь фрагмент чата VPN-операторов.
+Контекст: БС/белый список — список IP российских провайдеров для работы \
+российских сервисов через VPN. "Выведен из БС" — критично, IP перестал работать.
+Выдели максимум 5 конкретных фактов из этого отрезка. \
+Только факты с временем в формате [ЧЧ:ММ]. Без общих фраз. \
+Если ничего важного — ответь одним словом: ПУСТО"""
+
+FINAL_PROMPT = """\
 Ты анализируешь логи Telegram-чата русскоязычного сообщества операторов VPN-сервисов.
 
 КОНТЕКСТ (обязательно прочитай):
@@ -47,87 +55,126 @@ VPN-операторы арендуют серверы с такими IP что
 Секцию пропускай целиком если в ней нечего писать.
 Никаких общих фраз, никаких советов "будьте осторожны", только конкретика."""
 
-MAX_INPUT_CHARS = 6000
+MAX_BLOCK_CHARS = 4000
+BLOCK_HOURS = 2
+BLOCK_DELAY = 1.5
 
-IP_PATTERN = re.compile(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.(?:\d{1,3}|xxx|\*)")
-
-PROVIDERS = [
-    "рег.ру", "регру", "selectel", "селектел", "hetzner",
-    "aeza", "beget", "бегет", "timeweb", "таймвеб",
-    "yandex cloud", "я.облако", "vk cloud",
-]
-
-KEYWORDS = ["бс", "белый список", "белые списки", "выведен", "добавлен", "заблокирован"]
+BLOCK_BOUNDARIES = [(h, h + BLOCK_HOURS) for h in range(0, 24, BLOCK_HOURS)]
 
 
-def _build_mentions_section(messages: list[dict]) -> str:
-    ip_hits: dict[str, str] = {}
-    provider_hits: dict[str, str] = {}
-    keyword_hits: dict[str, str] = {}
+def _split_into_blocks(messages: list[dict]) -> dict[str, list[dict]]:
+    blocks: dict[str, list[dict]] = {}
+    for msg in messages:
+        hour = int(msg["time"].split(":")[0])
+        for start, end in BLOCK_BOUNDARIES:
+            if start <= hour < end:
+                label = f"{start:02d}:00–{end:02d}:00"
+                blocks.setdefault(label, []).append(msg)
+                break
+    return blocks
+
+
+def _format_block(messages: list[dict]) -> str:
+    text = "\n".join(f"[{m['time']}] {m['sender']}: {m['text']}" for m in messages)
+    if len(text) <= MAX_BLOCK_CHARS:
+        return text
+
+    head = []
+    tail = []
+    head_len = 0
+    tail_len = 0
+    budget = MAX_BLOCK_CHARS - 20
 
     for msg in messages:
-        text_lower = msg["text"].lower()
-        time = msg["time"]
+        line = f"[{msg['time']}] {msg['sender']}: {msg['text']}\n"
+        if head_len + len(line) < budget // 2:
+            head.append(line)
+            head_len += len(line)
+        else:
+            break
 
-        for match in IP_PATTERN.finditer(msg["text"]):
-            ip = match.group()
-            if ip not in ip_hits:
-                ip_hits[ip] = time
+    for msg in reversed(messages):
+        line = f"[{msg['time']}] {msg['sender']}: {msg['text']}\n"
+        if tail_len + len(line) < budget - head_len:
+            tail.insert(0, line)
+            tail_len += len(line)
+        else:
+            break
 
-        for provider in PROVIDERS:
-            if provider in text_lower and provider not in provider_hits:
-                provider_hits[provider] = time
-
-        for kw in KEYWORDS:
-            if kw in text_lower and kw not in keyword_hits:
-                keyword_hits[kw] = time
-
-    if not ip_hits and not provider_hits and not keyword_hits:
-        return ""
-
-    lines = ["\n## 🔍 Упоминания"]
-    if ip_hits:
-        items = ", ".join(f"{ip} [{t}]" for ip, t in ip_hits.items())
-        lines.append(f"🌐 IP: {items}")
-    if provider_hits:
-        items = ", ".join(f"{p} [{t}]" for p, t in provider_hits.items())
-        lines.append(f"🏢 Провайдеры: {items}")
-    if keyword_hits:
-        items = ", ".join(f"{kw} [{t}]" for kw, t in keyword_hits.items())
-        lines.append(f"🔑 Ключевые слова: {items}")
-
-    return "\n".join(lines)
+    return "".join(head) + "\n...\n" + "".join(tail)
 
 
 async def analyze_messages(messages: list[dict], config: Config) -> str:
-    chat_log = "\n".join(
-        f"[{m['time']}] {m['sender']}: {m['text']}" for m in messages
-    )
+    blocks = _split_into_blocks(messages)
+    non_empty = {label: msgs for label, msgs in blocks.items() if msgs}
 
-    if len(chat_log) > MAX_INPUT_CHARS:
-        chat_log = chat_log[-MAX_INPUT_CHARS:]
-        first_newline = chat_log.find("\n")
-        if first_newline != -1:
-            chat_log = chat_log[first_newline + 1:]
+    if not non_empty:
+        return "💤 За период ничего важного не произошло"
 
     client = AsyncGroq(api_key=config.groq_api_key)
 
-    logger.info(f"Sending {len(messages)} messages ({len(chat_log)} chars) to Groq for analysis")
+    if len(non_empty) == 1:
+        label, msgs = next(iter(non_empty.items()))
+        block_text = _format_block(msgs)
+        return await _final_pass(client, block_text)
+
+    summaries = []
+    for i, (label, msgs) in enumerate(sorted(non_empty.items())):
+        if i > 0:
+            await asyncio.sleep(BLOCK_DELAY)
+
+        block_text = _format_block(msgs)
+        logger.info(f"Pass 1: block {label} — {len(msgs)} messages, {len(block_text)} chars")
+
+        try:
+            response = await client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                max_tokens=500,
+                messages=[
+                    {"role": "system", "content": BLOCK_PROMPT},
+                    {"role": "user", "content": block_text},
+                ],
+            )
+            result = response.choices[0].message.content.strip()
+        except Exception:
+            logger.exception(f"Pass 1 failed for block {label}, skipping")
+            continue
+
+        if result.upper() == "ПУСТО":
+            logger.info(f"Block {label}: nothing important")
+            continue
+
+        summaries.append(f"### {label} МСК\n{result}")
+
+    if not summaries:
+        return "💤 За период ничего важного не произошло"
+
+    combined = "\n\n".join(summaries)
+    logger.info(f"Pass 2: {len(summaries)} block summaries, {len(combined)} chars")
+
+    await asyncio.sleep(BLOCK_DELAY)
+    return await _final_pass(client, combined, is_summaries=True)
+
+
+async def _final_pass(client: AsyncGroq, text: str, *, is_summaries: bool = False) -> str:
+    if is_summaries:
+        user_content = (
+            "Ниже краткие выжимки по временным блокам за весь день.\n"
+            "Составь итоговый дайджест по всем блокам.\n\n"
+            + text
+        )
+    else:
+        user_content = text
 
     response = await client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         max_tokens=1500,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": chat_log},
+            {"role": "system", "content": FINAL_PROMPT},
+            {"role": "user", "content": user_content},
         ],
     )
 
     result = response.choices[0].message.content
-    logger.info("Analysis complete")
-
-    mentions = _build_mentions_section(messages)
-    if mentions:
-        result += mentions
-
+    logger.info("Pass 2 complete")
     return result
