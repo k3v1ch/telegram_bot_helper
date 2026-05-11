@@ -56,9 +56,12 @@ FINAL_PROMPT = """\
 
 Секцию пропускай если в ней нечего писать. Никаких общих фраз."""
 
-MAX_BLOCK_CHARS = 4000
+MAX_BLOCK_CHARS = 6000
+MAX_BLOCKS = 6
 BLOCK_HOURS = 2
-BLOCK_DELAY = 1.5
+BLOCK_DELAY = 2
+RETRY_DELAY = 30
+STAGE3_DELAY = 10
 
 BLOCK_BOUNDARIES = [(h, h + BLOCK_HOURS) for h in range(0, 24, BLOCK_HOURS)]
 
@@ -79,6 +82,31 @@ def _split_into_blocks(messages: list[dict]) -> dict[str, list[dict]]:
                 blocks.setdefault(label, []).append(msg)
                 break
     return blocks
+
+
+def _merge_to_max_blocks(blocks: dict[str, list[dict]], max_blocks: int) -> dict[str, list[dict]]:
+    if len(blocks) <= max_blocks:
+        return blocks
+
+    labels = sorted(blocks.keys())
+    merged: list[tuple[str, list[dict]]] = [(l, blocks[l]) for l in labels]
+
+    while len(merged) > max_blocks:
+        min_size = float("inf")
+        min_idx = 0
+        for i in range(len(merged) - 1):
+            combined = len(merged[i][1]) + len(merged[i + 1][1])
+            if combined < min_size:
+                min_size = combined
+                min_idx = i
+
+        l1, m1 = merged[min_idx]
+        l2, m2 = merged[min_idx + 1]
+        new_label = f"{l1.split('–')[0]}–{l2.split('–')[1]}"
+        merged[min_idx] = (new_label, m1 + m2)
+        del merged[min_idx + 1]
+
+    return dict(merged)
 
 
 def _format_messages(messages: list[dict]) -> str:
@@ -112,6 +140,9 @@ async def analyze_messages(messages: list[dict], config: Config) -> AnalysisResu
     if not blocks:
         return AnalysisResult(text="💤 За период ничего важного не произошло", after_stage2=0)
 
+    blocks = _merge_to_max_blocks(blocks, MAX_BLOCKS)
+    logger.info(f"Stage 2: {len(blocks)} blocks after merging")
+
     client = AsyncGroq(api_key=config.groq_api_key)
 
     # --- Stage 2: AI rough filter ---
@@ -130,8 +161,8 @@ async def analyze_messages(messages: list[dict], config: Config) -> AnalysisResu
 
             try:
                 response = await client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    max_tokens=800,
+                    model="meta-llama/llama-4-scout-17b-16e-instruct",
+                    max_tokens=400,
                     temperature=0.1,
                     messages=[
                         {"role": "system", "content": FILTER_PROMPT},
@@ -140,10 +171,30 @@ async def analyze_messages(messages: list[dict], config: Config) -> AnalysisResu
                 )
                 result = response.choices[0].message.content.strip()
                 call_count += 1
-            except Exception:
-                logger.exception(f"Stage 2 failed for block {label}, skipping")
-                call_count += 1
-                continue
+            except Exception as e:
+                if "429" in str(e) or "rate" in str(e).lower():
+                    logger.warning(f"Stage 2: rate limited on block {label}, waiting {RETRY_DELAY}s")
+                    await asyncio.sleep(RETRY_DELAY)
+                    try:
+                        response = await client.chat.completions.create(
+                            model="meta-llama/llama-4-scout-17b-16e-instruct",
+                            max_tokens=400,
+                            temperature=0.1,
+                            messages=[
+                                {"role": "system", "content": FILTER_PROMPT},
+                                {"role": "user", "content": chunk},
+                            ],
+                        )
+                        result = response.choices[0].message.content.strip()
+                        call_count += 1
+                    except Exception:
+                        logger.exception(f"Stage 2 retry failed for block {label}, skipping")
+                        call_count += 1
+                        continue
+                else:
+                    logger.exception(f"Stage 2 failed for block {label}, skipping")
+                    call_count += 1
+                    continue
 
             if result.upper() == "ПУСТО":
                 logger.info(f"Stage 2: block {label} — nothing useful")
@@ -161,11 +212,11 @@ async def analyze_messages(messages: list[dict], config: Config) -> AnalysisResu
     combined = "\n\n".join(filtered_lines)
     logger.info(f"Stage 3: {len(combined)} chars of filtered content")
 
-    await asyncio.sleep(BLOCK_DELAY)
+    await asyncio.sleep(STAGE3_DELAY)
 
     try:
         response = await client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
             max_tokens=1500,
             temperature=0.3,
             messages=[
