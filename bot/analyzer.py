@@ -27,7 +27,7 @@ Format:
 
 If a section is empty — omit it. No section = nothing worth reporting there."""
 
-MAX_INPUT_CHARS = 8000
+MAX_INPUT_CHARS = 6000
 
 IP_PATTERN = re.compile(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.(?:\d{1,3}|xxx|\*)")
 
