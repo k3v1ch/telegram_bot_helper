@@ -1,6 +1,6 @@
 import logging
 
-import google.generativeai as genai
+from groq import AsyncGroq
 
 from bot.config import Config
 
@@ -33,16 +33,18 @@ async def analyze_messages(messages: list[dict], config: Config) -> str:
         f"[{m['time']}] {m['sender']}: {m['text']}" for m in messages
     )
 
-    genai.configure(api_key=config.gemini_api_key)
-    model = genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
-        system_instruction=SYSTEM_PROMPT,
+    client = AsyncGroq(api_key=config.groq_api_key)
+
+    logger.info(f"Sending {len(messages)} messages to Groq for analysis")
+
+    response = await client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": chat_log},
+        ],
     )
 
-    logger.info(f"Sending {len(messages)} messages to Gemini for analysis")
-
-    response = await model.generate_content_async(chat_log)
-
-    result = response.text
+    result = response.choices[0].message.content
     logger.info("Analysis complete")
     return result

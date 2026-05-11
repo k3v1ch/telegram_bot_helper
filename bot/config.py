@@ -12,7 +12,7 @@ class Config:
     source_topic_id: int
     dest_chat_id: int
     dest_topic_id: int
-    gemini_api_key: str
+    groq_api_key: str
     digest_time: str
     lookback_hours: int
     session_name: str
@@ -42,7 +42,7 @@ class Config:
             source_topic_id=source_topic_id,
             dest_chat_id=dest_chat_id,
             dest_topic_id=dest_topic_id,
-            gemini_api_key=require("GEMINI_API_KEY"),
+            groq_api_key=require("GROQ_API_KEY"),
             digest_time=os.getenv("DIGEST_TIME", "09:00"),
             lookback_hours=int(os.getenv("LOOKBACK_HOURS", "24")),
             session_name=os.getenv("SESSION_NAME", "userbot"),
