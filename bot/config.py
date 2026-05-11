@@ -13,12 +13,12 @@ class Config:
     dest_chat_id: int
     dest_topic_id: int
     groq_api_key: str
+    bot_token: str
+    admin_user_id: int
     digest_time: str
     lookback_hours: int
     session_name: str
-    bot_token: str | None
-    admin_id: int | None
-    alerts_enabled: bool
+    alerts_enabled_default: bool
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -46,12 +46,12 @@ class Config:
             dest_chat_id=dest_chat_id,
             dest_topic_id=dest_topic_id,
             groq_api_key=require("GROQ_API_KEY"),
+            bot_token=require("BOT_TOKEN"),
+            admin_user_id=int(require("ADMIN_USER_ID")),
             digest_time=os.getenv("DIGEST_TIME", "09:00"),
             lookback_hours=int(os.getenv("LOOKBACK_HOURS", "24")),
             session_name=os.getenv("SESSION_NAME", "userbot"),
-            bot_token=os.getenv("BOT_TOKEN"),
-            admin_id=int(admin) if (admin := os.getenv("ADMIN_ID")) else None,
-            alerts_enabled=os.getenv("ALERTS_ENABLED", "false").lower() == "true",
+            alerts_enabled_default=os.getenv("ALERTS_ENABLED", "true").lower() == "true",
         )
 
     @property

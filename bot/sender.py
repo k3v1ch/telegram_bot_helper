@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
-from telethon import TelegramClient
+from telegram import Bot
 
 from bot.config import Config
 from bot.stats import get_yesterday_count
@@ -42,14 +42,14 @@ def _build_header(
             arrow = f"▼ {diff}"
         else:
             arrow = "= 0"
-        lines.append(f"📊 Вчера: {yesterday_count} сообщений → сегодня: {message_count} ({arrow})")
+        lines.append(f"📊 Вчера: {yesterday_count} → сегодня: {message_count} ({arrow})")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     return "\n".join(lines) + "\n\n"
 
 
 async def send_digest(
-    client: TelegramClient,
+    bot: Bot,
     config: Config,
     digest_text: str,
     message_count: int,
@@ -61,35 +61,31 @@ async def send_digest(
     header = _build_header(source_chat_name, message_count, start_time, end_time, yesterday_count)
     full_text = header + digest_text
 
-    entity = await client.get_entity(config.dest_chat_id)
     chunks = _split_message(full_text)
-
     for chunk in chunks:
-        await client.send_message(
-            entity,
-            chunk,
-            reply_to=config.dest_topic_id,
+        await bot.send_message(
+            chat_id=config.dest_chat_id,
+            text=chunk,
+            message_thread_id=config.dest_topic_id,
         )
 
     logger.info(f"Digest sent to destination ({len(chunks)} message(s))")
 
 
-async def send_empty_notice(client: TelegramClient, config: Config) -> None:
-    entity = await client.get_entity(config.dest_chat_id)
-    await client.send_message(
-        entity,
-        "💤 За последние 24ч в чате ничего важного",
-        reply_to=config.dest_topic_id,
+async def send_empty_notice(bot: Bot, config: Config) -> None:
+    await bot.send_message(
+        chat_id=config.dest_chat_id,
+        text="💤 За последние 24ч в чате ничего важного",
+        message_thread_id=config.dest_topic_id,
     )
     logger.info("Empty notice sent")
 
 
-async def send_error(client: TelegramClient, config: Config, error: str) -> None:
-    entity = await client.get_entity(config.dest_chat_id)
-    await client.send_message(
-        entity,
-        f"⚠️ Ошибка при формировании дайджеста:\n{error}",
-        reply_to=config.dest_topic_id,
+async def send_error(bot: Bot, config: Config, error: str) -> None:
+    await bot.send_message(
+        chat_id=config.dest_chat_id,
+        text=f"⚠️ Ошибка при формировании дайджеста:\n{error}",
+        message_thread_id=config.dest_topic_id,
     )
     logger.error(f"Error notification sent: {error}")
 

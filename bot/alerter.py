@@ -3,10 +3,12 @@ import re
 import time
 from datetime import timedelta, timezone
 
+from telegram import Bot
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageService
 
 from bot.config import Config
+from bot.state import BotState
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +31,11 @@ DEBOUNCE_SECONDS = 600
 
 
 class Alerter:
-    def __init__(self, client: TelegramClient, config: Config):
-        self.client = client
+    def __init__(self, userbot: TelegramClient, bot: Bot, config: Config, state: BotState):
+        self.userbot = userbot
+        self.bot = bot
         self.config = config
+        self.state = state
         self._debounce: dict[str, float] = {}
 
     def _is_debounced(self, sender: str, keyword: str) -> bool:
@@ -64,19 +68,21 @@ class Alerter:
             f"👤 {sender_name}: {text}"
         )
         try:
-            entity = await self.client.get_entity(self.config.dest_chat_id)
-            await self.client.send_message(
-                entity,
-                alert,
-                reply_to=self.config.dest_topic_id,
+            await self.bot.send_message(
+                chat_id=self.config.dest_chat_id,
+                text=alert,
+                message_thread_id=self.config.dest_topic_id,
             )
             logger.info(f"Alert sent: {sender_name} at {msg_time}")
         except Exception:
             logger.exception("Failed to send alert")
 
     def register(self) -> None:
-        @self.client.on(events.NewMessage(chats=self.config.source_chat_id))
+        @self.userbot.on(events.NewMessage(chats=self.config.source_chat_id))
         async def handler(event):
+            if not self.state.alerts_enabled:
+                return
+
             msg = event.message
             if isinstance(msg, MessageService) or not msg.text:
                 return
@@ -98,7 +104,7 @@ class Alerter:
                 return
 
             msg_time = msg.date.astimezone(MSK).strftime("%H:%M")
-            source_entity = await self.client.get_entity(self.config.source_chat_id)
+            source_entity = await self.userbot.get_entity(self.config.source_chat_id)
             chat_name = getattr(source_entity, "title", str(self.config.source_chat_id))
 
             await self._send_alert(sender_name, msg.text, msg_time, chat_name)
