@@ -8,6 +8,7 @@ from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from telegram import Bot
 from telethon import TelegramClient
 
@@ -15,7 +16,7 @@ from bot.alerter import Alerter
 from bot.analyzer import analyze_messages
 from bot.config import Config
 from bot.digest_bot import build_bot_app
-from bot.pinned import check_pinned_update
+from bot.pinned import check_and_forward_pinned
 from bot.reader import fetch_messages
 from bot.sender import send_digest, send_empty_notice, send_error
 from bot.state import BotState
@@ -90,7 +91,7 @@ async def run_digest(
         start_time = messages[0]["time"]
         end_time = messages[-1]["time"]
 
-        pinned_preview = await check_pinned_update(userbot, config)
+        pinned_preview = await check_and_forward_pinned(userbot, bot, config)
 
         analysis = await analyze_messages(messages, config, weekly=weekly)
 
@@ -212,9 +213,24 @@ async def main() -> None:
         id="weekly_job",
     )
 
+    async def check_pinned():
+        try:
+            await check_and_forward_pinned(userbot, bot, config)
+        except Exception:
+            logger.exception("Periodic pinned check failed")
+
+    scheduler.add_job(
+        check_pinned,
+        IntervalTrigger(minutes=30),
+        id="pinned_check",
+    )
+
     scheduler.start()
     _update_next_run(scheduler, state)
     logger.info(f"Scheduler started, digest at {config.digest_time} MSK daily, weekly on {config.weekly_digest_day}")
+
+    await check_pinned()
+    logger.info("Initial pinned message check complete")
 
     async def digest_callback(lookback_hours: int | None = None, weekly: bool = False) -> int:
         count = await run_digest(userbot, bot, config, state, lookback_hours=lookback_hours, weekly=weekly)

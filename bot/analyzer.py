@@ -90,12 +90,19 @@ WEEKLY_PROMPT = """\
 
 Секцию пропускай если в ней нечего писать. Только самое важное."""
 
+COMPRESS_PROMPT = """\
+Сожми следующие уже отфильтрованные факты до самых важных.
+Оставь максимум 10 строк. Только конкретные факты с временем.
+Формат: [ЧЧ:ММ] факт"""
+
 MAX_BLOCK_CHARS = 6000
 MAX_BLOCKS = 6
 BLOCK_HOURS = 2
 BLOCK_DELAY = 2
 RETRY_DELAY = 30
 STAGE3_DELAY = 10
+STAGE25_CHUNK = 4000
+STAGE25_THRESHOLD = 8000
 
 BLOCK_BOUNDARIES = [(h, h + BLOCK_HOURS) for h in range(0, 24, BLOCK_HOURS)]
 
@@ -242,8 +249,39 @@ async def analyze_messages(messages: list[dict], config: Config, weekly: bool = 
     if not filtered_lines:
         return AnalysisResult(text="💤 За период ничего важного не произошло", after_stage2=0)
 
-    # --- Stage 3: Final analysis ---
+    # --- Stage 2.5: Compress filtered content for weekly digests ---
     combined = "\n\n".join(filtered_lines)
+    if weekly and len(combined) > STAGE25_THRESHOLD:
+        logger.info(f"Stage 2.5: {len(combined)} chars exceeds {STAGE25_THRESHOLD}, compressing")
+        compress_chunks = _split_text_into_chunks(combined, STAGE25_CHUNK)
+        compressed_lines: list[str] = []
+
+        for i, chunk in enumerate(compress_chunks):
+            if i > 0:
+                await asyncio.sleep(BLOCK_DELAY)
+
+            logger.info(f"Stage 2.5: chunk {i + 1}/{len(compress_chunks)} — {len(chunk)} chars")
+            try:
+                response = await client.chat.completions.create(
+                    model="meta-llama/llama-4-scout-17b-16e-instruct",
+                    max_tokens=300,
+                    temperature=0.1,
+                    messages=[
+                        {"role": "system", "content": COMPRESS_PROMPT},
+                        {"role": "user", "content": chunk},
+                    ],
+                )
+                result = response.choices[0].message.content.strip()
+                if result.upper() != "ПУСТО":
+                    compressed_lines.append(result)
+            except Exception:
+                logger.exception(f"Stage 2.5 failed for chunk {i + 1}, keeping original")
+                compressed_lines.append(chunk)
+
+        combined = "\n\n".join(compressed_lines)
+        logger.info(f"Stage 2.5 complete: {len(combined)} chars after compression")
+
+    # --- Stage 3: Final analysis ---
     stage3_prompt = WEEKLY_PROMPT if weekly else FINAL_PROMPT
     logger.info(f"Stage 3: {len(combined)} chars of filtered content (weekly={weekly})")
 

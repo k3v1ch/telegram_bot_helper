@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from telegram import Bot
 from telethon import TelegramClient
 from telethon.tl.types import InputMessagesFilterPinned
 
@@ -39,10 +40,12 @@ def _save_pinned(data_dir: Path, date: str, text: str) -> None:
         logger.exception("Failed to save pinned.json")
 
 
-async def check_pinned_update(client: TelegramClient, config: Config) -> str | None:
+async def check_and_forward_pinned(
+    userbot: TelegramClient, bot: Bot, config: Config,
+) -> str | None:
     try:
         pinned_msg = None
-        async for msg in client.iter_messages(
+        async for msg in userbot.iter_messages(
             config.source_chat_id, filter=InputMessagesFilterPinned(), limit=1
         ):
             pinned_msg = msg
@@ -54,16 +57,34 @@ async def check_pinned_update(client: TelegramClient, config: Config) -> str | N
         pinned_date = pinned_msg.date.astimezone(MSK).strftime("%Y-%m-%d %H:%M")
 
         old = _load_pinned(config.data_dir)
+
+        if old is not None and old.get("text") == pinned_text:
+            return None
+
         _save_pinned(config.data_dir, pinned_date, pinned_text)
+        logger.info("Pinned message changed, forwarding")
 
-        if old is None or old.get("text") != pinned_text:
-            preview = pinned_text[:200]
-            if len(pinned_text) > 200:
-                preview += "…"
-            logger.info("Pinned message changed")
-            return preview
+        source_entity = await userbot.get_entity(config.source_chat_id)
+        chat_name = getattr(source_entity, "title", str(config.source_chat_id))
+        msg_time = datetime.now(MSK).strftime("%H:%M")
 
-        return None
+        await bot.send_message(
+            chat_id=config.dest_chat_id,
+            text=f"📌 Обновлён закреп • {chat_name} • {msg_time} МСК",
+            message_thread_id=config.dest_topic_id,
+        )
+
+        await userbot.forward_messages(
+            entity=config.dest_chat_id,
+            messages=pinned_msg.id,
+            from_peer=config.source_chat_id,
+        )
+
+        preview = pinned_text[:200]
+        if len(pinned_text) > 200:
+            preview += "…"
+        return preview
+
     except Exception:
-        logger.exception("Failed to check pinned message")
+        logger.exception("Failed to check/forward pinned message")
         return None
