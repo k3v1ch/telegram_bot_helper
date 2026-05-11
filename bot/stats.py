@@ -3,6 +3,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from bot.atomic_io import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 MSK = timezone(timedelta(hours=3))
@@ -24,17 +26,10 @@ def load_stats(data_dir: Path) -> dict[str, int]:
 
 
 def save_today_count(data_dir: Path, count: int) -> None:
-    data_dir.mkdir(parents=True, exist_ok=True)
     today = datetime.now(MSK).strftime("%Y-%m-%d")
     stats = load_stats(data_dir)
     stats[today] = count
-    try:
-        _stats_path(data_dir).write_text(
-            json.dumps(stats, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except Exception:
-        logger.exception("Failed to save stats")
+    atomic_write_json(_stats_path(data_dir), stats)
 
 
 def get_yesterday_count(data_dir: Path) -> int | None:

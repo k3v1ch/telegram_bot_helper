@@ -3,6 +3,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from bot.atomic_io import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 MSK = timezone(timedelta(hours=3))
@@ -20,26 +22,49 @@ def _digests_dir(data_dir: Path) -> Path:
     return d
 
 
+DEFAULT_RETENTION_DAYS = 90
+
+
 def save_digest(data_dir: Path, digest_text: str, message_count: int, period: str) -> None:
     now = datetime.now(MSK)
     date_str = now.strftime("%Y-%m-%d")
-    filename = f"{date_str}.json"
-
-    if period == "7d":
-        filename = f"{date_str}-weekly.json"
+    time_str = now.strftime("%H%M")
+    filename = f"{date_str}_{time_str}_{period}.json"
 
     path = _digests_dir(data_dir) / filename
     data = {
         "date": date_str,
+        "time": now.strftime("%H:%M"),
         "period": period,
         "raw_text": digest_text,
         "message_count": message_count,
     }
-    try:
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    if atomic_write_json(path, data):
         logger.info(f"Digest saved to {path.name}")
-    except Exception:
-        logger.exception("Failed to save digest")
+        cleanup_old_digests(data_dir, days=DEFAULT_RETENTION_DAYS)
+
+
+def cleanup_old_digests(data_dir: Path, days: int = DEFAULT_RETENTION_DAYS) -> int:
+    cutoff = datetime.now(MSK) - timedelta(days=days)
+    digests_path = _digests_dir(data_dir)
+    removed = 0
+    for file in digests_path.glob("*.json"):
+        if file.name.endswith(".tmp"):
+            continue
+        try:
+            data = json.loads(file.read_text(encoding="utf-8"))
+            date_str = data.get("date")
+            if not date_str:
+                continue
+            dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=MSK)
+            if dt < cutoff:
+                file.unlink()
+                removed += 1
+        except Exception:
+            logger.exception(f"Cleanup failed for {file.name}")
+    if removed > 0:
+        logger.info(f"Cleanup removed {removed} digests older than {days} days")
+    return removed
 
 
 def search_digests(data_dir: Path, keyword: str, max_results: int = 5, max_lines: int = 2) -> list[dict]:
@@ -47,7 +72,10 @@ def search_digests(data_dir: Path, keyword: str, max_results: int = 5, max_lines
     keyword_lower = keyword.lower()
     results = []
 
-    files = sorted(digests_path.glob("*.json"), reverse=True)
+    files = sorted(
+        (f for f in digests_path.glob("*.json") if not f.name.endswith(".tmp")),
+        reverse=True,
+    )
 
     for file in files:
         if len(results) >= max_results:

@@ -103,6 +103,7 @@ RETRY_DELAY = 30
 STAGE3_DELAY = 10
 STAGE25_CHUNK = 4000
 STAGE25_THRESHOLD = 8000
+API_TIMEOUT = 60.0
 
 BLOCK_BOUNDARIES = [(h, h + BLOCK_HOURS) for h in range(0, 24, BLOCK_HOURS)]
 
@@ -205,6 +206,7 @@ async def analyze_messages(messages: list[dict], config: Config, weekly: bool = 
                     model="meta-llama/llama-4-scout-17b-16e-instruct",
                     max_tokens=400,
                     temperature=0.1,
+                    timeout=API_TIMEOUT,
                     messages=[
                         {"role": "system", "content": FILTER_PROMPT},
                         {"role": "user", "content": chunk},
@@ -221,6 +223,7 @@ async def analyze_messages(messages: list[dict], config: Config, weekly: bool = 
                             model="meta-llama/llama-4-scout-17b-16e-instruct",
                             max_tokens=400,
                             temperature=0.1,
+                            timeout=API_TIMEOUT,
                             messages=[
                                 {"role": "system", "content": FILTER_PROMPT},
                                 {"role": "user", "content": chunk},
@@ -266,6 +269,7 @@ async def analyze_messages(messages: list[dict], config: Config, weekly: bool = 
                     model="meta-llama/llama-4-scout-17b-16e-instruct",
                     max_tokens=300,
                     temperature=0.1,
+                    timeout=API_TIMEOUT,
                     messages=[
                         {"role": "system", "content": COMPRESS_PROMPT},
                         {"role": "user", "content": chunk},
@@ -287,20 +291,37 @@ async def analyze_messages(messages: list[dict], config: Config, weekly: bool = 
 
     await asyncio.sleep(STAGE3_DELAY)
 
-    try:
-        response = await client.chat.completions.create(
+    stage3_messages = [
+        {"role": "system", "content": stage3_prompt},
+        {"role": "user", "content": f"Проанализируй следующие отфильтрованные сообщения и составь дайджест:\n\n{combined}"},
+    ]
+
+    async def _stage3_call():
+        return await client.chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct",
             max_tokens=1500,
             temperature=0.3,
-            messages=[
-                {"role": "system", "content": stage3_prompt},
-                {"role": "user", "content": f"Проанализируй следующие отфильтрованные сообщения и составь дайджест:\n\n{combined}"},
-            ],
+            timeout=API_TIMEOUT,
+            messages=stage3_messages,
         )
+
+    try:
+        response = await _stage3_call()
         digest = response.choices[0].message.content
         logger.info("Stage 3 complete")
-    except Exception:
-        logger.exception("Stage 3 failed")
-        return AnalysisResult(text="⚠️ Ошибка при финальном анализе", after_stage2=after_stage2)
+    except Exception as e:
+        if "429" in str(e) or "rate" in str(e).lower():
+            logger.warning(f"Stage 3: rate limited, waiting {RETRY_DELAY}s")
+            await asyncio.sleep(RETRY_DELAY)
+            try:
+                response = await _stage3_call()
+                digest = response.choices[0].message.content
+                logger.info("Stage 3 complete after retry")
+            except Exception:
+                logger.exception("Stage 3 retry failed")
+                return AnalysisResult(text="⚠️ Ошибка при финальном анализе", after_stage2=after_stage2)
+        else:
+            logger.exception("Stage 3 failed")
+            return AnalysisResult(text="⚠️ Ошибка при финальном анализе", after_stage2=after_stage2)
 
     return AnalysisResult(text=digest, after_stage2=after_stage2)

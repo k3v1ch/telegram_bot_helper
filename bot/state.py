@@ -3,6 +3,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from bot.atomic_io import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 MSK = timezone(timedelta(hours=3))
@@ -29,14 +31,7 @@ class BotState:
         return defaults
 
     def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            self._path.write_text(
-                json.dumps(self._data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception:
-            logger.exception("Failed to save state.json")
+        atomic_write_json(self._path, self._data)
 
     @property
     def alerts_enabled(self) -> bool:

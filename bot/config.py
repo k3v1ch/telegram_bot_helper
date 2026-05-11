@@ -20,6 +20,7 @@ class Config:
     session_name: str
     alerts_enabled_default: bool
     weekly_digest_day: str
+    health_port: int
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -54,6 +55,7 @@ class Config:
             session_name=os.getenv("SESSION_NAME", "userbot"),
             alerts_enabled_default=os.getenv("ALERTS_ENABLED", "true").lower() == "true",
             weekly_digest_day=os.getenv("WEEKLY_DIGEST_DAY", "mon").lower()[:3],
+            health_port=int(os.getenv("HEALTH_PORT", "8080")),
         )
 
     @property

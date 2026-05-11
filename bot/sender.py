@@ -114,13 +114,21 @@ async def send_empty_notice(bot: Bot, config: Config) -> None:
     logger.info("Empty notice sent")
 
 
+def sanitize_error(error: str, max_len: int = 300) -> str:
+    safe = str(error).replace("\n", " ").replace("\r", " ").strip()
+    if len(safe) > max_len:
+        safe = safe[:max_len] + "…"
+    return safe
+
+
 async def send_error(bot: Bot, config: Config, error: str) -> None:
+    safe = sanitize_error(error)
     await bot.send_message(
         chat_id=config.dest_chat_id,
-        text=f"⚠️ Ошибка при формировании дайджеста:\n{error}",
+        text=f"⚠️ Ошибка при формировании дайджеста:\n{safe}",
         message_thread_id=config.dest_topic_id,
     )
-    logger.error(f"Error notification sent: {error}")
+    logger.error(f"Error notification sent: {safe}")
 
 
 def _split_message(text: str) -> list[str]:

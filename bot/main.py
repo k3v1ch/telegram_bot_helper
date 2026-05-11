@@ -16,6 +16,7 @@ from bot.alerter import Alerter
 from bot.analyzer import analyze_messages
 from bot.config import Config
 from bot.digest_bot import build_bot_app
+from bot.health import make_health_app, run_health_server
 from bot.pinned import check_and_forward_pinned
 from bot.reader import fetch_messages
 from bot.sender import send_digest, send_empty_notice, send_error
@@ -27,6 +28,7 @@ MSK = timezone(timedelta(hours=3))
 logger = logging.getLogger("bot")
 
 userbot_client: TelegramClient | None = None
+_digest_lock = asyncio.Lock()
 
 
 def setup_logging() -> None:
@@ -69,6 +71,17 @@ async def run_digest(
     userbot: TelegramClient, bot: Bot, config: Config, state: BotState,
     lookback_hours: int | None = None, weekly: bool = False,
 ) -> int:
+    if _digest_lock.locked():
+        logger.warning("Digest already in progress, waiting for the running one to finish")
+
+    async with _digest_lock:
+        return await _run_digest_locked(userbot, bot, config, state, lookback_hours, weekly)
+
+
+async def _run_digest_locked(
+    userbot: TelegramClient, bot: Bot, config: Config, state: BotState,
+    lookback_hours: int | None, weekly: bool,
+) -> int:
     hours = lookback_hours if lookback_hours is not None else config.lookback_hours
     label = "weekly" if weekly else "daily"
     logger.info(f"Starting {label} digest generation (lookback={hours}h)")
@@ -101,7 +114,9 @@ async def run_digest(
             f"{analysis.after_stage2} after S2"
         )
 
-        if hours <= 1:
+        if weekly:
+            period = "7d"
+        elif hours <= 1:
             period = "1h"
         elif hours <= 5:
             period = "5h"
@@ -109,8 +124,6 @@ async def run_digest(
             period = "12h"
         elif hours <= 24:
             period = "24h"
-        elif weekly:
-            period = "7d"
         else:
             period = f"{hours}h"
 
@@ -205,12 +218,16 @@ async def main() -> None:
         scheduled_digest,
         CronTrigger(hour=config.digest_hour, minute=config.digest_minute, timezone=MSK),
         id="digest_job",
+        misfire_grace_time=600,
+        coalesce=True,
     )
 
     scheduler.add_job(
         scheduled_weekly,
         CronTrigger(day_of_week=config.weekly_digest_day, hour=5, minute=0, timezone=MSK),
         id="weekly_job",
+        misfire_grace_time=1800,
+        coalesce=True,
     )
 
     async def check_pinned():
@@ -223,6 +240,8 @@ async def main() -> None:
         check_pinned,
         IntervalTrigger(minutes=30),
         id="pinned_check",
+        misfire_grace_time=300,
+        coalesce=True,
     )
 
     scheduler.start()
@@ -243,10 +262,13 @@ async def main() -> None:
     app = build_bot_app(config, state, digest_callback)
     stop_event = asyncio.Event()
 
+    health_app = make_health_app(lambda: userbot_client, state)
+
     try:
         await asyncio.gather(
             run_bot(app, stop_event),
             run_userbot(userbot, stop_event),
+            run_health_server(health_app, config.health_port, stop_event),
         )
     except (KeyboardInterrupt, SystemExit):
         pass

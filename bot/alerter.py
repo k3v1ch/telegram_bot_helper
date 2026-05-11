@@ -37,6 +37,17 @@ class Alerter:
         self.config = config
         self.state = state
         self._debounce: dict[str, float] = {}
+        self._chat_name: str | None = None
+
+    async def _get_chat_name(self) -> str:
+        if self._chat_name is None:
+            try:
+                entity = await self.userbot.get_entity(self.config.source_chat_id)
+                self._chat_name = getattr(entity, "title", str(self.config.source_chat_id))
+            except Exception:
+                logger.exception("Failed to resolve source chat name")
+                self._chat_name = str(self.config.source_chat_id)
+        return self._chat_name
 
     def _is_debounced(self, sender: str, keyword: str) -> bool:
         key = f"{sender}:{keyword}"
@@ -104,8 +115,7 @@ class Alerter:
                 return
 
             msg_time = msg.date.astimezone(MSK).strftime("%H:%M")
-            source_entity = await self.userbot.get_entity(self.config.source_chat_id)
-            chat_name = getattr(source_entity, "title", str(self.config.source_chat_id))
+            chat_name = await self._get_chat_name()
 
             await self._send_alert(sender_name, msg.text, msg_time, chat_name)
 

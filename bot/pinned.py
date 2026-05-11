@@ -7,6 +7,7 @@ from telegram import Bot
 from telethon import TelegramClient
 from telethon.tl.types import InputMessagesFilterPinned
 
+from bot.atomic_io import atomic_write_json
 from bot.config import Config
 
 logger = logging.getLogger(__name__)
@@ -30,14 +31,7 @@ def _load_pinned(data_dir: Path) -> dict | None:
 
 
 def _save_pinned(data_dir: Path, date: str, text: str) -> None:
-    data_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        _pinned_path(data_dir).write_text(
-            json.dumps({"date": date, "text": text}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except Exception:
-        logger.exception("Failed to save pinned.json")
+    atomic_write_json(_pinned_path(data_dir), {"date": date, "text": text})
 
 
 async def check_and_forward_pinned(
