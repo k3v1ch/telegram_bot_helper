@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "PowerShell(New-Item -ItemType Directory -Path \"bot\" -Force)",
-      "PowerShell(Get-ChildItem -Recurse -File | Select-Object -ExpandProperty FullName | ForEach-Object { $_.Replace\\(\"C:\\\\Users\\\\viplu\\\\Documents\\\\GitHub\\\\telegram_bot_helper\\\\\", \"\"\\) })"
+      "PowerShell(Get-ChildItem -Recurse -File | Select-Object -ExpandProperty FullName | ForEach-Object { $_.Replace\\(\"C:\\\\Users\\\\viplu\\\\Documents\\\\GitHub\\\\telegram_bot_helper\\\\\", \"\"\\) })",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(gh pr *)",
+      "PowerShell(Get-Command gh -ErrorAction SilentlyContinue; where.exe gh 2>$null; Test-Path \"$env:LOCALAPPDATA\\\\GitHub CLI\\\\gh.exe\")"
     ]
   }
 }
