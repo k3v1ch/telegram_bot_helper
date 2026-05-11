@@ -14,6 +14,7 @@ from bot.analyzer import analyze_messages
 from bot.config import Config
 from bot.reader import fetch_messages
 from bot.sender import send_digest, send_empty_notice, send_error
+from bot.stats import save_today_count
 
 MSK = timezone(timedelta(hours=3))
 
@@ -62,6 +63,8 @@ async def run_digest(client: TelegramClient, config: Config) -> None:
     try:
         messages = await fetch_messages(client, config)
 
+        save_today_count(config.data_dir, len(messages))
+
         if not messages:
             await send_empty_notice(client, config)
             return
@@ -69,8 +72,14 @@ async def run_digest(client: TelegramClient, config: Config) -> None:
         source_entity = await client.get_entity(config.source_chat_id)
         source_name = getattr(source_entity, "title", str(config.source_chat_id))
 
+        start_time = messages[0]["time"]
+        end_time = messages[-1]["time"]
+
         digest_text = await analyze_messages(messages, config)
-        await send_digest(client, config, digest_text, len(messages), source_name)
+        await send_digest(
+            client, config, digest_text, len(messages),
+            source_name, start_time, end_time,
+        )
 
     except Exception as e:
         logger.exception("Digest generation failed")
@@ -95,25 +104,42 @@ async def main() -> None:
 
     if args.now:
         await run_digest(client, config)
-    else:
-        scheduler = AsyncIOScheduler()
-        scheduler.add_job(
-            run_digest,
-            CronTrigger(
-                hour=config.digest_hour,
-                minute=config.digest_minute,
-                timezone=MSK,
-            ),
-            args=[client, config],
-        )
-        scheduler.start()
-        logger.info(f"Scheduler started, digest at {config.digest_time} MSK daily")
+        await client.disconnect()
+        return
 
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        run_digest,
+        CronTrigger(
+            hour=config.digest_hour,
+            minute=config.digest_minute,
+            timezone=MSK,
+        ),
+        args=[client, config],
+    )
+    scheduler.start()
+    logger.info(f"Scheduler started, digest at {config.digest_time} MSK daily")
+
+    if config.alerts_enabled:
         try:
-            await asyncio.Event().wait()
-        except (KeyboardInterrupt, SystemExit):
-            scheduler.shutdown()
-            logger.info("Scheduler stopped")
+            from bot.alerter import Alerter
+            alerter = Alerter(client, config)
+            alerter.register()
+        except Exception:
+            logger.exception("Failed to start alerter")
+
+    if config.bot_token:
+        try:
+            from bot.digest_bot import start_digest_bot
+            start_digest_bot(config, lambda: run_digest(client, config))
+        except Exception:
+            logger.exception("Failed to start bot")
+
+    try:
+        await asyncio.Event().wait()
+    except (KeyboardInterrupt, SystemExit):
+        scheduler.shutdown()
+        logger.info("Scheduler stopped")
 
     await client.disconnect()
 

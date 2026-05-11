@@ -1,4 +1,5 @@
 import logging
+import re
 
 from groq import AsyncGroq
 
@@ -6,26 +7,76 @@ from bot.config import Config
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are an assistant that analyzes Telegram chat logs from a Russian VPN/networking community.
-Your task: create a concise daily digest in Russian.
+SYSTEM_PROMPT = """\
+You are analyzing a Telegram chat of Russian VPN operators discussing whitelists (белые списки/БС), \
+hosting, and IP addresses. Your job: extract ONLY actionable, factual information.
 
-Rules:
-- Focus ONLY on meaningful technical/operational information
-- Ignore: greetings, "thanks", off-topic chatter, memes, reactions
-- Prioritize: announcements, config changes, hosting news, whitelist (белый список) updates,
-  new features, warnings, important decisions, links to useful resources
-- For each important event: show the TIME (HH:MM MSK) so the reader can find it in chat
-- Group by importance:
+STRICT RULES:
+- IGNORE: greetings, questions without answers, complaints, off-topic, memes, single-word replies
+- INCLUDE ONLY: confirmed facts, announcements, specific IP/subnet news, provider updates, \
+technical findings with clear conclusions
+- Each item must be a COMPLETE thought, not a chat fragment
+- Summarize multi-message discussions into ONE coherent sentence
+- If something was discussed but no conclusion reached — skip it entirely
+- Times: show only the START time of the discussion, not every message
 
-## 🔴 Важное (critical announcements, breaking changes, urgent warnings)
-## 🟡 Обновления (config changes, new features, hosting info)
-## 🔵 Обсуждения (useful technical discussions worth knowing about)
-## ℹ️ Прочее (minor but notable things)
+Format:
+## 🔴 Важное (IP выведены/добавлены в БС, критические изменения)
+## 🟡 Обновления (проверенные факты о провайдерах, IP-диапазонах, ценах)
+## 🔵 Полезное (технические выводы, рабочие конфиги, рекомендации)
 
-If a section has nothing — omit it entirely.
-If the chat was quiet and nothing important happened — say so briefly.
-Format times as [HH:MM] before each item.
-Keep each item to 1-3 sentences max."""
+If a section is empty — omit it. No section = nothing worth reporting there."""
+
+MAX_INPUT_CHARS = 8000
+
+IP_PATTERN = re.compile(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.(?:\d{1,3}|xxx|\*)")
+
+PROVIDERS = [
+    "рег.ру", "регру", "selectel", "селектел", "hetzner",
+    "aeza", "beget", "бегет", "timeweb", "таймвеб",
+    "yandex cloud", "я.облако", "vk cloud",
+]
+
+KEYWORDS = ["бс", "белый список", "белые списки", "выведен", "добавлен", "заблокирован"]
+
+
+def _build_mentions_section(messages: list[dict]) -> str:
+    ip_hits: dict[str, str] = {}
+    provider_hits: dict[str, str] = {}
+    keyword_hits: dict[str, str] = {}
+
+    for msg in messages:
+        text_lower = msg["text"].lower()
+        time = msg["time"]
+
+        for match in IP_PATTERN.finditer(msg["text"]):
+            ip = match.group()
+            if ip not in ip_hits:
+                ip_hits[ip] = time
+
+        for provider in PROVIDERS:
+            if provider in text_lower and provider not in provider_hits:
+                provider_hits[provider] = time
+
+        for kw in KEYWORDS:
+            if kw in text_lower and kw not in keyword_hits:
+                keyword_hits[kw] = time
+
+    if not ip_hits and not provider_hits and not keyword_hits:
+        return ""
+
+    lines = ["\n## 🔍 Упоминания"]
+    if ip_hits:
+        items = ", ".join(f"{ip} [{t}]" for ip, t in ip_hits.items())
+        lines.append(f"🌐 IP: {items}")
+    if provider_hits:
+        items = ", ".join(f"{p} [{t}]" for p, t in provider_hits.items())
+        lines.append(f"🏢 Провайдеры: {items}")
+    if keyword_hits:
+        items = ", ".join(f"{kw} [{t}]" for kw, t in keyword_hits.items())
+        lines.append(f"🔑 Ключевые слова: {items}")
+
+    return "\n".join(lines)
 
 
 async def analyze_messages(messages: list[dict], config: Config) -> str:
@@ -33,12 +84,19 @@ async def analyze_messages(messages: list[dict], config: Config) -> str:
         f"[{m['time']}] {m['sender']}: {m['text']}" for m in messages
     )
 
+    if len(chat_log) > MAX_INPUT_CHARS:
+        chat_log = chat_log[-MAX_INPUT_CHARS:]
+        first_newline = chat_log.find("\n")
+        if first_newline != -1:
+            chat_log = chat_log[first_newline + 1:]
+
     client = AsyncGroq(api_key=config.groq_api_key)
 
-    logger.info(f"Sending {len(messages)} messages to Groq for analysis")
+    logger.info(f"Sending {len(messages)} messages ({len(chat_log)} chars) to Groq for analysis")
 
     response = await client.chat.completions.create(
         model="llama-3.3-70b-versatile",
+        max_tokens=1500,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": chat_log},
@@ -47,4 +105,9 @@ async def analyze_messages(messages: list[dict], config: Config) -> str:
 
     result = response.choices[0].message.content
     logger.info("Analysis complete")
+
+    mentions = _build_mentions_section(messages)
+    if mentions:
+        result += mentions
+
     return result

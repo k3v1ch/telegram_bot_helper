@@ -17,11 +17,13 @@ async def fetch_messages(client: TelegramClient, config: Config) -> list[dict]:
 
     entity = await client.get_entity(config.source_chat_id)
 
+    total_fetched = 0
     async for msg in client.iter_messages(
         entity,
         reply_to=config.source_topic_id,
         offset_date=datetime.now(tz=timezone.utc),
     ):
+        total_fetched += 1
         msg_time = msg.date.astimezone(MSK)
         if msg_time < cutoff:
             break
@@ -43,6 +45,9 @@ async def fetch_messages(client: TelegramClient, config: Config) -> list[dict]:
             "text": msg.text,
         })
 
+    logger.info(f"Total messages scanned from topic: {total_fetched}")
     messages.reverse()
-    logger.info(f"Fetched {len(messages)} messages from source chat")
+    logger.info(f"Messages after filtering: {len(messages)}")
+    if messages:
+        logger.info(f"Time range: {messages[0]['time']} — {messages[-1]['time']} MSK")
     return messages

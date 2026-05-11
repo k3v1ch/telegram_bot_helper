@@ -16,6 +16,8 @@ class Config:
     digest_time: str
     lookback_hours: int
     session_name: str
+    bot_token: str | None
+    alerts_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -46,7 +48,13 @@ class Config:
             digest_time=os.getenv("DIGEST_TIME", "09:00"),
             lookback_hours=int(os.getenv("LOOKBACK_HOURS", "24")),
             session_name=os.getenv("SESSION_NAME", "userbot"),
+            bot_token=os.getenv("BOT_TOKEN"),
+            alerts_enabled=os.getenv("ALERTS_ENABLED", "false").lower() == "true",
         )
+
+    @property
+    def data_dir(self) -> Path:
+        return Path("/app/data")
 
     @property
     def session_path(self) -> Path:

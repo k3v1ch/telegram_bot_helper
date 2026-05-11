@@ -6,5 +6,6 @@ services:
     volumes:
       - ./sessions:/app/sessions
       - ./logs:/app/logs
+      - ./data:/app/data
     stdin_open: true
     tty: true

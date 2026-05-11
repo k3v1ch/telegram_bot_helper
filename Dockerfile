@@ -11,6 +11,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot/ bot/
 
-RUN mkdir -p /app/sessions /app/logs
+RUN mkdir -p /app/sessions /app/logs /app/data
 
 ENTRYPOINT ["python", "-m", "bot.main"]
