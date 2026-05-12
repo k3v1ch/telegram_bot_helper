@@ -4,4 +4,3 @@ logs/
 data/
 __pycache__/
 *.session
-CLAUDE.md
