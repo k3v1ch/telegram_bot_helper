@@ -12,6 +12,7 @@ from telegram.ext import (
 
 from bot.db import crud
 from bot.db.database import get_session
+from bot.handlers.cancel import cancel_dispatch, set_cancel_return
 from bot.handlers.start import check_blocked
 from bot.keyboards import CB_CANCEL, back_to_chat, cancel_inline
 from bot.states import SEARCH_QUERY
@@ -34,6 +35,7 @@ async def search_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return ConversationHandler.END
 
     context.user_data["search_chat_id"] = chat_id
+    set_cancel_return(context, "chat_detail", chat_id)
     await update.callback_query.edit_message_text(
         "🔎 Введите слово для поиска:",
         reply_markup=cancel_inline(),
@@ -103,17 +105,7 @@ def _matching_lines(text: str, query: str, limit: int) -> list[str]:
     return out
 
 
-async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.callback_query:
-        await update.callback_query.answer()
-        try:
-            await update.callback_query.edit_message_text("❌ Поиск отменён.")
-        except Exception:
-            pass
-    elif update.message:
-        await update.message.reply_text("❌ Поиск отменён.")
-    context.user_data.pop("search_chat_id", None)
-    return ConversationHandler.END
+# search_cancel removed — uses generic cancel_dispatch from bot.handlers.cancel
 
 
 def build_conversation() -> ConversationHandler:
@@ -123,8 +115,8 @@ def build_conversation() -> ConversationHandler:
             SEARCH_QUERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_run)],
         },
         fallbacks=[
-            CallbackQueryHandler(search_cancel, pattern=rf"^{CB_CANCEL}$"),
-            CommandHandler("cancel", search_cancel),
+            CallbackQueryHandler(cancel_dispatch, pattern=rf"^{CB_CANCEL}$"),
+            CommandHandler("cancel", cancel_dispatch),
         ],
         name="search_conversation",
         persistent=False,

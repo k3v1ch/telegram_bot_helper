@@ -138,6 +138,11 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _send_main_menu(update, context, edit=False)
 
 
+async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send the main menu as a new message (used by cancel handlers)."""
+    await _send_main_menu(update, context, edit=False)
+
+
 @check_blocked
 async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.callback_query is None:

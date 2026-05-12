@@ -15,6 +15,7 @@ from telethon.errors import SessionPasswordNeededError
 from bot import userbot
 from bot.db import crud
 from bot.db.database import get_session
+from bot.handlers.cancel import cancel_dispatch, set_cancel_return
 from bot.handlers.start import check_blocked
 from bot.keyboards import (
     CB_ACCOUNT_ADD,
@@ -56,6 +57,7 @@ async def auth_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         reply_markup=cancel_inline(),
     )
     context.user_data["auth"] = {}
+    set_cancel_return(context, "accounts_list")
     return AUTH_LABEL
 
 
@@ -195,7 +197,8 @@ async def auth_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return ConversationHandler.END
 
 
-async def auth_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def _auth_cleanup(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Telethon-specific cleanup before generic cancel_dispatch runs."""
     state = context.user_data.get("auth") or {}
     session_id = state.get("session_id")
     if session_id is not None and userbot.manager is not None:
@@ -204,16 +207,12 @@ async def auth_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         except Exception:
             pass
 
-    if update.callback_query:
-        await update.callback_query.answer()
-        try:
-            await update.callback_query.edit_message_text("❌ Авторизация отменена.")
-        except Exception:
-            pass
-    elif update.message:
-        await update.message.reply_text("❌ Авторизация отменена.")
-    context.user_data.pop("auth", None)
-    return ConversationHandler.END
+
+async def auth_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancel that first releases the pending Telethon client, then delegates to the
+    generic ``cancel_dispatch`` to return the user to the screen where they started."""
+    await _auth_cleanup(context)
+    return await cancel_dispatch(update, context)
 
 
 # --- Reconnect existing session --------------------------------------------
@@ -237,6 +236,7 @@ async def account_reconnect_entry(update: Update, context: ContextTypes.DEFAULT_
         return ConversationHandler.END
 
     context.user_data["auth"] = {"label": row.label or "Аккаунт"}
+    set_cancel_return(context, "account_detail", session_id)
     await update.callback_query.edit_message_text(
         "📱 Введите номер телефона для переподключения:",
         reply_markup=cancel_inline(),
@@ -257,6 +257,7 @@ async def rename_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     except (ValueError, IndexError):
         return ConversationHandler.END
     context.user_data["rename_session_id"] = session_id
+    set_cancel_return(context, "account_detail", session_id)
     await update.callback_query.edit_message_text(
         "✏️ Введите новое название аккаунта:",
         reply_markup=cancel_inline(),
@@ -285,17 +286,7 @@ async def rename_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return ConversationHandler.END
 
 
-async def rename_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.callback_query:
-        await update.callback_query.answer()
-        try:
-            await update.callback_query.edit_message_text("❌ Отменено.")
-        except Exception:
-            pass
-    elif update.message:
-        await update.message.reply_text("❌ Отменено.")
-    context.user_data.pop("rename_session_id", None)
-    return ConversationHandler.END
+# rename_cancel removed — uses generic cancel_dispatch from bot.handlers.cancel
 
 
 # --- Build conversation handlers -------------------------------------------
@@ -329,8 +320,8 @@ def build_rename_conversation() -> ConversationHandler:
             EDIT_SESSION_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, rename_save)],
         },
         fallbacks=[
-            CallbackQueryHandler(rename_cancel, pattern=rf"^{CB_CANCEL}$"),
-            CommandHandler("cancel", rename_cancel),
+            CallbackQueryHandler(cancel_dispatch, pattern=rf"^{CB_CANCEL}$"),
+            CommandHandler("cancel", cancel_dispatch),
         ],
         name="rename_session",
         persistent=False,

@@ -2,6 +2,11 @@
 
 Auth-flow conversations live in ``bot.handlers.auth``; this module only handles
 the read-only screens and the destructive revoke action.
+
+Each public screen exposes two flavours:
+    - ``*_show``  — callback handler that edits the current message
+    - ``send_*_screen`` — sends the screen as a NEW message (used by cancel
+      handlers in :mod:`bot.handlers.cancel`).
 """
 
 import logging
@@ -32,43 +37,22 @@ def _connected_session_ids() -> set[int]:
     return set(userbot.manager._clients.keys())
 
 
-@check_blocked
-async def accounts_show(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.callback_query is None or update.effective_user is None:
-        return
-    await update.callback_query.answer()
-    user_id = update.effective_user.id
-
+async def _build_accounts_payload(user_id: int):
     async with get_session() as session:
         sessions = await crud.get_user_sessions(session, user_id)
-
     connected = _connected_session_ids()
     if not sessions:
         text = "👤 У вас пока нет подключённых аккаунтов.\nНажмите ➕ чтобы добавить."
     else:
         text = f"👤 Ваши аккаунты ({len(sessions)})"
-
-    await update.callback_query.edit_message_text(
-        text,
-        reply_markup=accounts_list(sessions, connected),
-    )
+    return text, accounts_list(sessions, connected)
 
 
-@check_blocked
-async def account_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.callback_query is None or update.callback_query.data is None:
-        return
-    await update.callback_query.answer()
-    try:
-        session_id = int(update.callback_query.data.split(":", 1)[1])
-    except (ValueError, IndexError):
-        return
-
+async def _build_account_detail_payload(user_id: int, session_id: int):
     async with get_session() as session:
         row = await crud.get_session_by_id(session, session_id)
-        if row is None or update.effective_user is None or row.user_id != update.effective_user.id:
-            await update.callback_query.edit_message_text("❌ Аккаунт не найден.")
-            return
+        if row is None or row.user_id != user_id:
+            return None
         chats_count = await crud.count_session_chats(session, session_id)
 
     connected = session_id in _connected_session_ids()
@@ -81,7 +65,77 @@ async def account_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"{status} • с {authorized_at}\n"
         f"💬 Чатов: {chats_count}"
     )
-    await update.callback_query.edit_message_text(text, reply_markup=account_detail(session_id))
+    return text, account_detail(session_id)
+
+
+async def _send_new(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup) -> None:
+    chat = update.effective_chat
+    if chat is None:
+        return
+    await context.bot.send_message(chat_id=chat.id, text=text, reply_markup=reply_markup)
+
+
+# --- Public callback handlers (edit current message) ----------------------
+
+
+@check_blocked
+async def accounts_show(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query is None or update.effective_user is None:
+        return
+    await update.callback_query.answer()
+    text, kb = await _build_accounts_payload(update.effective_user.id)
+    try:
+        await update.callback_query.edit_message_text(text, reply_markup=kb)
+    except Exception:
+        await _send_new(update, context, text, kb)
+
+
+@check_blocked
+async def account_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query is None or update.callback_query.data is None:
+        return
+    await update.callback_query.answer()
+    try:
+        session_id = int(update.callback_query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return
+    if update.effective_user is None:
+        return
+    payload = await _build_account_detail_payload(update.effective_user.id, session_id)
+    if payload is None:
+        await update.callback_query.edit_message_text("❌ Аккаунт не найден.")
+        return
+    text, kb = payload
+    try:
+        await update.callback_query.edit_message_text(text, reply_markup=kb)
+    except Exception:
+        await _send_new(update, context, text, kb)
+
+
+# --- Send-as-new-message helpers (used by cancel) -------------------------
+
+
+async def send_accounts_screen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user is None:
+        return
+    text, kb = await _build_accounts_payload(update.effective_user.id)
+    await _send_new(update, context, text, kb)
+
+
+async def send_account_detail_screen(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, session_id: int
+) -> None:
+    if update.effective_user is None:
+        return
+    payload = await _build_account_detail_payload(update.effective_user.id, session_id)
+    if payload is None:
+        await _send_new(update, context, "❌ Аккаунт не найден.", None)
+        return
+    text, kb = payload
+    await _send_new(update, context, text, kb)
+
+
+# --- Revoke ---------------------------------------------------------------
 
 
 @check_blocked

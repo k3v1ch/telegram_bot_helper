@@ -11,7 +11,8 @@
       "PowerShell(Get-Command gh -ErrorAction SilentlyContinue; where.exe gh 2>$null; Test-Path \"$env:LOCALAPPDATA\\\\GitHub CLI\\\\gh.exe\")",
       "Bash(python -m pip install -q -r requirements-dev.txt)",
       "Bash(python -m pytest)",
-      "Bash(python -m pytest -q)"
+      "Bash(python -m pytest -q)",
+      "Bash(python -m pytest tests/test_cancel.py -v)"
     ]
   }
 }

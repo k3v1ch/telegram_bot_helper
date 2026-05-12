@@ -206,9 +206,56 @@ PostgreSQL 16. Timestamps — UTC naive, в UI — МСК.
 - `digest` сервис на python:3.11-slim, `depends_on: postgres: service_healthy`, mountит `./logs`.
 - Первый запуск: `cp .env.example .env`, fill, `docker compose up -d`, в боте `/start` и Telethon auth.
 
+## Cancel pattern (важно для всех ConversationHandlers)
+
+Все cancel-кнопки (`❌ Отмена`) и `/cancel` молча возвращают пользователя на тот экран, откуда он начал действие. Никаких "❌ Отменено." сообщений в чат.
+
+**Реализация — `bot/handlers/cancel.py`:**
+
+1. В каждом entry-point Conversation вызывается `set_cancel_return(context, target, target_id)`. Возможные `target`:
+
+   | target | target_id | возвращает на |
+   |--------|-----------|---------------|
+   | `"main_menu"` | — | главное меню |
+   | `"accounts_list"` | — | список аккаунтов |
+   | `"account_detail"` | session_id | карточка аккаунта |
+   | `"chats_list"` | — | список чатов |
+   | `"chat_detail"` | chat_id | карточка чата |
+   | `"chat_settings"` | chat_id | настройки чата |
+
+2. Fallback'ом в ConversationHandler стоит универсальный `cancel_dispatch` — он:
+   - снимает spinner у callback;
+   - чистит per-flow state (`auth`, `add_chat`, `edit_chat_id`, `search_chat_id`, …);
+   - читает `cancel_return` и зовёт соответствующий `send_*_screen` helper.
+
+3. Каждый экран имеет два варианта рендера:
+   - `*_show` / `chat_open` / `chat_settings_cb` / `accounts_show` / `account_open` — callback handlers, редактируют текущее сообщение через `edit_message_text`.
+   - `send_*_screen(update, context [, target_id])` — отправляют экран как НОВОЕ сообщение через `context.bot.send_message`. Используются только cancel-диспетчером.
+
+**Текущие маршруты cancel:**
+
+| Flow | Entry point | Cancel target |
+|------|-------------|---------------|
+| Add account | `auth.auth_entry` | `accounts_list` |
+| Rename account | `auth.rename_entry` | `account_detail` (session_id) |
+| Reconnect account | `auth.account_reconnect_entry` | `account_detail` (session_id) |
+| Add chat | `chats.add_entry` | `chats_list` |
+| Edit prompt | `chats.edit_prompt_entry` | `chat_settings` (chat_id) |
+| Edit schedule | `chats.edit_time_entry` | `chat_settings` (chat_id) |
+| Edit period | `chats.edit_hours_entry` | `chat_settings` (chat_id) |
+| Edit source/dest | `chats.edit_src_entry` | `chat_settings` (chat_id) |
+| Edit keywords | `chats.edit_keywords_entry` | `chat_detail` (chat_id) |
+| Search | `search.search_entry` | `chat_detail` (chat_id) |
+
+Delete-confirm флоу не ConversationHandler, у них `"← Отмена"` в keyboard указывает прямо на parent screen callback:
+- `account_revoke_confirm` → `account_detail`
+- `chat_delete_confirm` → `chat_detail` (раньше шёл в `chat_settings` — исправлено)
+
+`auth.auth_cancel` — единственный flow с дополнительной логикой: сначала освобождает pending Telethon-клиент (`manager.cancel_pending(session_id)`), затем делегирует `cancel_dispatch`. Поэтому он остаётся обёрткой, а не прямой ссылкой на `cancel_dispatch`.
+
 ## Tests
 
-Запуск: `pip install -r requirements-dev.txt && pytest`. 130+ юнит-тестов, не трогают внешних сервисов.
+Запуск: `pip install -r requirements-dev.txt && pytest`. 138 юнит-тестов, не трогают внешних сервисов.
 
 ## Conventions
 

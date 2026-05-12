@@ -14,6 +14,7 @@ from telegram.ext import (
 from bot import scheduler as scheduler_mod
 from bot.db import crud
 from bot.db.database import get_session
+from bot.handlers.cancel import cancel_dispatch, set_cancel_return
 from bot.handlers.start import check_blocked, require_session
 from bot.keyboards import (
     CB_ADD_HOURS_PREFIX,
@@ -71,6 +72,67 @@ DEST_HELP = (
 )
 
 
+# --- Payload builders & send-as-new helpers -------------------------------
+
+
+async def _build_chats_payload(user_id: int):
+    async with get_session() as session:
+        chats = await crud.get_user_chats(session, user_id)
+        sessions = await crud.get_user_sessions(session, user_id)
+    labels = {s.id: (s.label or "—") for s in sessions}
+    text = "💬 Ваши чаты" if chats else "У вас пока нет чатов. Нажмите ➕ чтобы добавить."
+    return text, chats_list(chats, labels)
+
+
+async def _build_chat_detail_payload(user_id: int, chat_id: int):
+    async with get_session() as session:
+        chat = await crud.get_chat(session, chat_id)
+        if chat is None or chat.user_id != user_id:
+            return None
+        session_row = (
+            await crud.get_session_by_id(session, chat.session_id) if chat.session_id else None
+        )
+    return _chat_header(chat, session_row), chat_menu(chat)
+
+
+def _build_chat_settings_payload(chat_id: int):
+    return "⚙️ Настройки чата:", chat_settings(chat_id)
+
+
+async def _send_new(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup) -> None:
+    chat = update.effective_chat
+    if chat is None:
+        return
+    await context.bot.send_message(chat_id=chat.id, text=text, reply_markup=reply_markup)
+
+
+async def send_chats_screen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user is None:
+        return
+    text, kb = await _build_chats_payload(update.effective_user.id)
+    await _send_new(update, context, text, kb)
+
+
+async def send_chat_detail_screen(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int
+) -> None:
+    if update.effective_user is None:
+        return
+    payload = await _build_chat_detail_payload(update.effective_user.id, chat_id)
+    if payload is None:
+        await _send_new(update, context, "❌ Чат не найден.", None)
+        return
+    text, kb = payload
+    await _send_new(update, context, text, kb)
+
+
+async def send_chat_settings_screen(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int
+) -> None:
+    text, kb = _build_chat_settings_payload(chat_id)
+    await _send_new(update, context, text, kb)
+
+
 # --- Chats list / detail ---------------------------------------------------
 
 
@@ -80,17 +142,11 @@ async def chats_show(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if update.callback_query is None or update.effective_user is None:
         return
     await update.callback_query.answer()
-    user_id = update.effective_user.id
-    async with get_session() as session:
-        chats = await crud.get_user_chats(session, user_id)
-        sessions = await crud.get_user_sessions(session, user_id)
-
-    labels = {s.id: (s.label or "—") for s in sessions}
-    text = "💬 Ваши чаты" if chats else "У вас пока нет чатов. Нажмите ➕ чтобы добавить."
-    await update.callback_query.edit_message_text(
-        text,
-        reply_markup=chats_list(chats, labels),
-    )
+    text, kb = await _build_chats_payload(update.effective_user.id)
+    try:
+        await update.callback_query.edit_message_text(text, reply_markup=kb)
+    except Exception:
+        await _send_new(update, context, text, kb)
 
 
 @check_blocked
@@ -102,20 +158,17 @@ async def chat_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = int(update.callback_query.data.split(":", 1)[1])
     except (ValueError, IndexError):
         return
-    async with get_session() as session:
-        chat = await crud.get_chat(session, chat_id)
-        if chat is None or update.effective_user is None or chat.user_id != update.effective_user.id:
-            await update.callback_query.edit_message_text("❌ Чат не найден.")
-            return
-        session_row = (
-            await crud.get_session_by_id(session, chat.session_id)
-            if chat.session_id else None
-        )
-
-    await update.callback_query.edit_message_text(
-        _chat_header(chat, session_row),
-        reply_markup=chat_menu(chat),
-    )
+    if update.effective_user is None:
+        return
+    payload = await _build_chat_detail_payload(update.effective_user.id, chat_id)
+    if payload is None:
+        await update.callback_query.edit_message_text("❌ Чат не найден.")
+        return
+    text, kb = payload
+    try:
+        await update.callback_query.edit_message_text(text, reply_markup=kb)
+    except Exception:
+        await _send_new(update, context, text, kb)
 
 
 def _chat_header(chat, session_row) -> str:
@@ -211,10 +264,11 @@ async def chat_settings_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         chat_id = int(update.callback_query.data.split(":", 1)[1])
     except (ValueError, IndexError):
         return
-    await update.callback_query.edit_message_text(
-        "⚙️ Настройки чата:",
-        reply_markup=chat_settings(chat_id),
-    )
+    text, kb = _build_chat_settings_payload(chat_id)
+    try:
+        await update.callback_query.edit_message_text(text, reply_markup=kb)
+    except Exception:
+        await _send_new(update, context, text, kb)
 
 
 @check_blocked
@@ -294,6 +348,7 @@ async def add_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             reply_markup=cancel_inline(),
         )
     context.user_data["add_chat"] = {}
+    set_cancel_return(context, "chats_list")
     return ADD_CHAT_NAME
 
 
@@ -487,17 +542,7 @@ async def _finalize_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return ConversationHandler.END
 
 
-async def add_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.callback_query:
-        await update.callback_query.answer()
-        try:
-            await update.callback_query.edit_message_text("❌ Добавление отменено.")
-        except Exception:
-            pass
-    elif update.message:
-        await update.message.reply_text("❌ Добавление отменено.")
-    context.user_data.pop("add_chat", None)
-    return ConversationHandler.END
+# Cancel handlers — see bot.handlers.cancel.cancel_dispatch
 
 
 # --- Edit conversations ----------------------------------------------------
@@ -514,6 +559,7 @@ async def edit_prompt_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.callback_query.answer()
     chat_id = _parse_chat_id(update.callback_query.data or "")
     context.user_data["edit_chat_id"] = chat_id
+    set_cancel_return(context, "chat_settings", chat_id)
     await update.callback_query.edit_message_text(
         "✏️ Введите новый промпт:",
         reply_markup=cancel_inline(),
@@ -543,6 +589,7 @@ async def edit_time_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.callback_query.answer()
     chat_id = _parse_chat_id(update.callback_query.data or "")
     context.user_data["edit_chat_id"] = chat_id
+    set_cancel_return(context, "chat_settings", chat_id)
     await update.callback_query.edit_message_text(
         "🕐 Введите новое время HH:MM:",
         reply_markup=cancel_inline(),
@@ -581,6 +628,7 @@ async def edit_hours_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.callback_query.answer()
     chat_id = _parse_chat_id(update.callback_query.data or "")
     context.user_data["edit_chat_id"] = chat_id
+    set_cancel_return(context, "chat_settings", chat_id)
     await update.callback_query.edit_message_text(
         "📏 Введите период в часах (1–168):",
         reply_markup=cancel_inline(),
@@ -624,6 +672,7 @@ async def edit_src_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = _parse_chat_id(update.callback_query.data or "")
     context.user_data["edit_chat_id"] = chat_id
     context.user_data["edit_src_step"] = "source"
+    set_cancel_return(context, "chat_settings", chat_id)
     await update.callback_query.edit_message_text(
         "📥 Введите новый источник chat_id:topic_id:",
         reply_markup=cancel_inline(),
@@ -674,6 +723,7 @@ async def edit_keywords_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.callback_query.answer()
     chat_id = _parse_chat_id(update.callback_query.data or "")
     context.user_data["edit_chat_id"] = chat_id
+    set_cancel_return(context, "chat_detail", chat_id)
     default_hint = ", ".join(DEFAULT_KEYWORDS)
     await update.callback_query.edit_message_text(
         "🔔 Введите ключевые слова через запятую.\n"
@@ -701,18 +751,7 @@ async def edit_keywords_save(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 
-async def edit_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.callback_query:
-        await update.callback_query.answer()
-        try:
-            await update.callback_query.edit_message_text("❌ Отменено.")
-        except Exception:
-            pass
-    elif update.message:
-        await update.message.reply_text("❌ Отменено.")
-    for k in ("edit_chat_id", "edit_src_step", "edit_src_value"):
-        context.user_data.pop(k, None)
-    return ConversationHandler.END
+# edit_cancel removed — all flows now use cancel_dispatch from bot.handlers.cancel
 
 
 # --- Handler factory -------------------------------------------------------
@@ -734,8 +773,8 @@ def build_add_conversation() -> ConversationHandler:
             ],
         },
         fallbacks=[
-            CallbackQueryHandler(add_cancel, pattern=rf"^{CB_CANCEL}$"),
-            CommandHandler("cancel", add_cancel),
+            CallbackQueryHandler(cancel_dispatch, pattern=rf"^{CB_CANCEL}$"),
+            CommandHandler("cancel", cancel_dispatch),
         ],
         name="add_chat_conversation",
         persistent=False,
@@ -744,8 +783,8 @@ def build_add_conversation() -> ConversationHandler:
 
 def build_edit_conversations() -> list[ConversationHandler]:
     fallbacks = [
-        CallbackQueryHandler(edit_cancel, pattern=rf"^{CB_CANCEL}$"),
-        CommandHandler("cancel", edit_cancel),
+        CallbackQueryHandler(cancel_dispatch, pattern=rf"^{CB_CANCEL}$"),
+        CommandHandler("cancel", cancel_dispatch),
     ]
     return [
         ConversationHandler(

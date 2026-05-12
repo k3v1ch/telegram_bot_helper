@@ -166,7 +166,7 @@ def chat_keywords_menu(chat_id: int) -> InlineKeyboardMarkup:
 def chat_delete_confirm(chat_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🗑 Да, удалить", callback_data=f"{CB_CHAT_DELETE_CONFIRM}:{chat_id}")],
-        [InlineKeyboardButton("← Отмена", callback_data=f"{CB_CHAT_SETTINGS}:{chat_id}")],
+        [InlineKeyboardButton("← Отмена", callback_data=f"{CB_CHAT_OPEN}:{chat_id}")],
     ])
 
 
