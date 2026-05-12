@@ -61,6 +61,13 @@ async def get_session_str(session: AsyncSession, user_id: int) -> str | None:
     return result.scalar_one_or_none()
 
 
+async def get_authorized_user_ids(session: AsyncSession) -> list[int]:
+    result = await session.execute(
+        select(UserSession.user_id).where(UserSession.is_authorized.is_(True))
+    )
+    return list(result.scalars().all())
+
+
 async def save_session(
     session: AsyncSession,
     user_id: int,

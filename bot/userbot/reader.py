@@ -1,12 +1,9 @@
 import logging
 import re
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from telethon import TelegramClient
-from telethon.tl.types import MessageService
-
-from bot.config import Config
+from telethon.tl.types import InputMessagesFilterPinned, MessageService
 
 logger = logging.getLogger(__name__)
 
@@ -20,24 +17,20 @@ EMOJI_ONLY = re.compile(
 )
 
 
-@dataclass
-class FetchResult:
-    messages: list[dict]
-    total_fetched: int
-    after_stage1: int
+async def fetch_messages(
+    client: TelegramClient,
+    source_chat_id: int,
+    source_topic_id: int,
+    lookback_hours: int,
+) -> list[dict]:
+    cutoff = datetime.now(MSK) - timedelta(hours=lookback_hours)
+    entity = await client.get_entity(source_chat_id)
 
-
-async def fetch_messages(client: TelegramClient, config: Config, lookback_hours: int | None = None) -> FetchResult:
-    hours = lookback_hours if lookback_hours is not None else config.lookback_hours
-    cutoff = datetime.now(MSK) - timedelta(hours=hours)
-
-    entity = await client.get_entity(config.source_chat_id)
-
-    raw = []
+    raw: list[dict] = []
     total_fetched = 0
     async for msg in client.iter_messages(
         entity,
-        reply_to=config.source_topic_id,
+        reply_to=source_topic_id,
         offset_date=datetime.now(tz=timezone.utc),
     ):
         total_fetched += 1
@@ -72,11 +65,15 @@ async def fetch_messages(client: TelegramClient, config: Config, lookback_hours:
         })
 
     raw.reverse()
-    after_stage1 = len(raw)
-    removed = total_fetched - after_stage1
+    logger.info(
+        f"Stage 1: chat={source_chat_id} topic={source_topic_id} "
+        f"scanned={total_fetched} kept={len(raw)}"
+    )
+    return raw
 
-    logger.info(f"Stage 1: scanned {total_fetched}, kept {after_stage1}, removed {removed}")
-    if raw:
-        logger.info(f"Time range: {raw[0]['time']} — {raw[-1]['time']} MSK")
 
-    return FetchResult(messages=raw, total_fetched=total_fetched, after_stage1=after_stage1)
+async def fetch_pinned(client: TelegramClient, source_chat_id: int) -> str | None:
+    entity = await client.get_entity(source_chat_id)
+    async for msg in client.iter_messages(entity, filter=InputMessagesFilterPinned, limit=1):
+        return msg.text or None
+    return None
