@@ -2,6 +2,10 @@
 
 Project guidance for Claude Code working in this repo.
 
+## Communication
+
+Общайся с пользователем на русском языке. Код, идентификаторы, имена коммитов и технические артефакты — на английском.
+
 ## Project
 
 Telegram Digest Bot. A userbot (Telethon) reads messages from source chats; a bot (python-telegram-bot) analyzes them via Groq API, sends scheduled digests and real-time alerts, and exposes an inline-menu management interface.
