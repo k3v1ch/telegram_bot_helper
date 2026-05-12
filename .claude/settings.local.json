@@ -11,7 +11,13 @@
       "PowerShell(Get-Command gh -ErrorAction SilentlyContinue; where.exe gh 2>$null; Test-Path \"$env:LOCALAPPDATA\\\\GitHub CLI\\\\gh.exe\")",
       "Bash(python -m pip install -q -r requirements-dev.txt)",
       "Bash(python -m pytest)",
-      "Bash(python -m pytest -q)"
+      "Bash(python -m pytest -q)",
+      "Bash(docker compose *)",
+      "Bash(gh auth *)",
+      "Bash(ssh -T -o StrictHostKeyChecking=accept-new -o BatchMode=yes git@github.com)",
+      "Bash(env)",
+      "Bash(docker exec telegram_bot_helper-postgres-1 *)",
+      "Bash(docker exec *)"
     ]
   }
 }
