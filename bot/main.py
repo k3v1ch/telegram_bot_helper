@@ -95,9 +95,10 @@ async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 def _register_handlers(app: Application) -> None:
-    start_cmd, menu_cmd, main_router = start_handlers.build_handlers()
+    start_cmd, menu_cmd, back_cb, main_router = start_handlers.build_handlers()
     app.add_handler(start_cmd)
     app.add_handler(menu_cmd)
+    app.add_handler(back_cb)
 
     for h in auth_handlers.build_handlers():
         app.add_handler(h)

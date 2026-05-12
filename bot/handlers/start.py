@@ -3,11 +3,18 @@ import logging
 from typing import Callable
 
 from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from bot.db import crud
 from bot.db.database import get_session
 from bot.keyboards import (
+    CB_BACK_MAIN,
     MAIN_ACCOUNT,
     MAIN_ADMIN,
     MAIN_MY_CHATS,
@@ -137,9 +144,24 @@ async def main_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
 
+@check_blocked
+async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query is None:
+        return
+    await update.callback_query.answer()
+    try:
+        await update.callback_query.delete_message()
+    except Exception:
+        try:
+            await update.callback_query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+
 def build_handlers() -> list:
     return [
         CommandHandler("start", start_command),
         CommandHandler("menu", menu_command),
+        CallbackQueryHandler(back_to_main, pattern=rf"^{CB_BACK_MAIN}$"),
         MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_router),
     ]
