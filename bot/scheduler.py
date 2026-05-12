@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import date as date_type, datetime, timedelta, timezone
 from typing import AsyncContextManager, Callable
@@ -6,6 +7,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Bot
+from telethon.errors import FloodWaitError
 
 from bot import analyzer
 from bot.db import crud
@@ -20,9 +22,17 @@ MSK = timezone(timedelta(hours=3))
 SessionFactory = Callable[[], AsyncContextManager[AsyncSession]]
 
 
-def parse_chat_topic(value: str) -> tuple[int, int]:
-    chat_str, topic_str = value.split(":", 1)
-    return int(chat_str), int(topic_str)
+def parse_chat_topic(value: str) -> tuple[int, int | None]:
+    """Parse a `chat_id:topic_id` or bare `chat_id` (personal chat) string.
+
+    Personal chats (DMs) have no topic and are stored as the user_id alone;
+    group topics keep the `chat_id:topic_id` format.
+    """
+    value = value.strip()
+    if ":" in value:
+        chat_str, topic_str = value.split(":", 1)
+        return int(chat_str), int(topic_str)
+    return int(value), None
 
 
 def _period_label(lookback_hours: int) -> str:
@@ -119,29 +129,26 @@ class DigestScheduler:
             self.remove_chat_jobs(chat_id)
 
     async def run_digest(self, chat_id: int, lookback_hours: int) -> None:
-        async with self.db_factory() as session:
-            chat = await crud.get_chat(session, chat_id)
-            if chat is None:
-                logger.warning(f"run_digest: chat {chat_id} not found")
-                return
-            if not chat.is_active:
-                logger.info(f"run_digest: chat {chat_id} inactive, skipping")
-                return
-            user = await crud.get_user(session, chat.user_id)
-            if user is None or user.is_blocked:
-                logger.info(f"run_digest: user {chat.user_id} missing or blocked, skipping")
-                return
-            prev_pinned_row = await crud.get_pinned(session, chat.id)
-            previous_pinned = prev_pinned_row.text if prev_pinned_row else None
-
-        if not await self.manager.is_connected(chat.user_id):
-            logger.warning(f"run_digest: user {chat.user_id} userbot not connected")
-            return
-
         try:
-            client = await self.manager.get_client(chat.user_id)
-        except ValueError:
-            logger.warning(f"run_digest: no client for user {chat.user_id}")
+            async with self.db_factory() as session:
+                chat = await crud.get_chat(session, chat_id)
+                if chat is None:
+                    logger.warning(f"run_digest: chat {chat_id} not found, removing job")
+                    self.remove_chat_jobs(chat_id)
+                    return
+                if not chat.is_active:
+                    logger.info(f"run_digest: chat {chat_id} inactive, skipping")
+                    return
+                user = await crud.get_user(session, chat.user_id)
+                if user is None or user.is_blocked:
+                    logger.info(
+                        f"run_digest: user {chat.user_id} missing or blocked, skipping"
+                    )
+                    return
+                prev_pinned_row = await crud.get_pinned(session, chat.id)
+                previous_pinned = prev_pinned_row.text if prev_pinned_row else None
+        except Exception:
+            logger.exception(f"run_digest: failed loading chat {chat_id} from DB")
             return
 
         try:
@@ -149,6 +156,10 @@ class DigestScheduler:
             dest_chat_id, dest_topic_id = parse_chat_topic(chat.dest)
         except (ValueError, AttributeError) as e:
             logger.exception(f"run_digest: malformed source/dest for chat {chat_id}: {e}")
+            return
+
+        client = await self._resolve_client(chat, dest_chat_id, dest_topic_id)
+        if client is None:
             return
 
         weekly = lookback_hours >= 168
@@ -162,9 +173,25 @@ class DigestScheduler:
                 lookback_hours=lookback_hours,
                 previous_pinned=previous_pinned,
             )
+        except FloodWaitError as e:
+            wait = max(1, int(getattr(e, "seconds", 1)))
+            logger.warning(f"run_digest: FloodWait {wait}s for chat {chat_id}, retrying once")
+            await asyncio.sleep(wait)
+            try:
+                messages, pinned_changed, pinned_text = await fetch_messages(
+                    client,
+                    source_chat_id=source_chat_id,
+                    source_topic_id=source_topic_id,
+                    lookback_hours=lookback_hours,
+                    previous_pinned=previous_pinned,
+                )
+            except Exception as e2:
+                logger.exception(f"run_digest: fetch retry failed for chat {chat_id}")
+                await _safe_send_error(self.bot, dest_chat_id, dest_topic_id, chat.name, str(e2))
+                return
         except Exception as e:
             logger.exception(f"run_digest: fetch failed for chat {chat_id}")
-            await send_error(self.bot, dest_chat_id, dest_topic_id, chat.name, str(e))
+            await _safe_send_error(self.bot, dest_chat_id, dest_topic_id, chat.name, str(e))
             return
 
         if pinned_changed:
@@ -176,7 +203,12 @@ class DigestScheduler:
         s1_count = total
 
         if not messages:
-            await send_empty_notice(self.bot, dest_chat_id, dest_topic_id, chat.name, period_label)
+            try:
+                await send_empty_notice(
+                    self.bot, dest_chat_id, dest_topic_id, chat.name, period_label
+                )
+            except Exception:
+                logger.exception(f"run_digest: empty-notice send failed for chat {chat_id}")
             await self._record_stats(chat, total)
             return
 
@@ -188,7 +220,7 @@ class DigestScheduler:
             )
         except Exception as e:
             logger.exception(f"run_digest: analyzer failed for chat {chat_id}")
-            await send_error(self.bot, dest_chat_id, dest_topic_id, chat.name, str(e))
+            await _safe_send_error(self.bot, dest_chat_id, dest_topic_id, chat.name, str(e))
             return
 
         async with self.db_factory() as session:
@@ -238,6 +270,42 @@ class DigestScheduler:
             f"total={total} s2={s2_count}"
         )
 
+    async def _resolve_client(
+        self,
+        chat: Chat,
+        dest_chat_id: int,
+        dest_topic_id: int | None,
+    ):
+        try:
+            if await self.manager.is_connected(chat.user_id):
+                return await self.manager.get_client(chat.user_id)
+        except Exception:
+            logger.exception(f"run_digest: get_client failed for user {chat.user_id}")
+
+        logger.warning(
+            f"run_digest: user {chat.user_id} userbot offline, attempting reconnect"
+        )
+        try:
+            ok = await self.manager.start_client(chat.user_id)
+        except Exception:
+            logger.exception(f"run_digest: start_client raised for user {chat.user_id}")
+            ok = False
+
+        if not ok:
+            await _safe_send_error(
+                self.bot,
+                dest_chat_id,
+                dest_topic_id,
+                chat.name,
+                "Userbot не подключён — переподключите аккаунт через бота.",
+            )
+            return None
+        try:
+            return await self.manager.get_client(chat.user_id)
+        except Exception:
+            logger.exception(f"run_digest: get_client after reconnect failed for {chat.user_id}")
+            return None
+
     async def _record_stats(self, chat: Chat, count: int) -> None:
         async with self.db_factory() as session:
             await crud.upsert_daily_stats(
@@ -283,6 +351,19 @@ class DigestScheduler:
         if pinned_text is not None:
             async with self.db_factory() as session:
                 await crud.upsert_pinned(session, chat.id, pinned_text)
+
+
+async def _safe_send_error(
+    bot: Bot,
+    dest_chat_id: int,
+    dest_topic_id: int | None,
+    chat_name: str,
+    err: str,
+) -> None:
+    try:
+        await send_error(bot, dest_chat_id, dest_topic_id, chat_name, err)
+    except Exception:
+        logger.exception(f"Failed to deliver error notice for chat '{chat_name}'")
 
 
 scheduler: DigestScheduler | None = None

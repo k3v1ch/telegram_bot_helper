@@ -220,7 +220,8 @@ async def analyze(
                 result = response.choices[0].message.content.strip()
                 call_count += 1
             except Exception as e:
-                if "429" in str(e) or "rate" in str(e).lower():
+                err = str(e).lower()
+                if "429" in err or "503" in err or "rate" in err or "unavailable" in err:
                     logger.warning(f"Stage 2: rate limited on block {label}, waiting {RETRY_DELAY}s")
                     await asyncio.sleep(RETRY_DELAY)
                     try:
@@ -320,8 +321,9 @@ async def analyze(
         digest = response.choices[0].message.content
         logger.info("Stage 3 complete")
     except Exception as e:
-        if "429" in str(e) or "rate" in str(e).lower():
-            logger.warning(f"Stage 3: rate limited, waiting {RETRY_DELAY}s")
+        err = str(e).lower()
+        if "429" in err or "503" in err or "rate" in err or "unavailable" in err:
+            logger.warning(f"Stage 3: rate limited or unavailable, waiting {RETRY_DELAY}s")
             await asyncio.sleep(RETRY_DELAY)
             try:
                 response = await _stage3_call()

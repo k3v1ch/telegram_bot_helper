@@ -90,7 +90,7 @@ def _split_message(text: str) -> list[str]:
 async def send_digest(
     bot: Bot,
     dest_chat_id: int,
-    dest_topic_id: int,
+    dest_topic_id: int | None,
     chat_name: str,
     digest_text: str,
     total_count: int,
@@ -125,7 +125,7 @@ async def send_digest(
 async def send_empty_notice(
     bot: Bot,
     dest_chat_id: int,
-    dest_topic_id: int,
+    dest_topic_id: int | None,
     chat_name: str,
     period: str,
 ) -> None:
@@ -147,7 +147,7 @@ def sanitize_error(error: str, max_len: int = 300) -> str:
 async def send_error(
     bot: Bot,
     dest_chat_id: int,
-    dest_topic_id: int,
+    dest_topic_id: int | None,
     chat_name: str,
     error: str,
 ) -> None:

@@ -41,8 +41,16 @@ from bot.states import (
 
 logger = logging.getLogger(__name__)
 
-SRC_DEST_RE = re.compile(r"^-?\d+:\d+$")
+SOURCE_RE = re.compile(r"^-?\d+:\d+$")
+DEST_RE = re.compile(r"^-?\d+(:\d+)?$")
 TIME_RE = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
+
+DEST_HELP = (
+    "📤 Введите назначение куда отправлять дайджест:\n"
+    "• Группа с топиком: -1003332852289:220\n"
+    "• Личные сообщения: ваш user_id (например 635544292)\n\n"
+    "Свой user_id можно узнать через @userinfobot"
+)
 
 
 # ---------- Add chat conversation ----------
@@ -89,7 +97,7 @@ async def add_source(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.message is None:
         return ADD_CHAT_SOURCE
     src = (update.message.text or "").strip()
-    if not SRC_DEST_RE.match(src):
+    if not SOURCE_RE.match(src):
         await update.message.reply_text(
             "❌ Формат: chat_id:topic_id. Попробуйте ещё раз:",
             reply_markup=cancel_inline(),
@@ -97,7 +105,7 @@ async def add_source(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ADD_CHAT_SOURCE
     context.user_data["add_chat"]["source"] = src
     await update.message.reply_text(
-        "📤 Введите назначение в формате chat_id:topic_id:",
+        DEST_HELP,
         reply_markup=cancel_inline(),
     )
     return ADD_CHAT_DEST
@@ -108,9 +116,9 @@ async def add_dest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.message is None:
         return ADD_CHAT_DEST
     dst = (update.message.text or "").strip()
-    if not SRC_DEST_RE.match(dst):
+    if not DEST_RE.match(dst):
         await update.message.reply_text(
-            "❌ Формат: chat_id:topic_id. Попробуйте ещё раз:",
+            "❌ Нужен chat_id:topic_id или просто user_id. Попробуйте ещё раз:",
             reply_markup=cancel_inline(),
         )
         return ADD_CHAT_DEST
@@ -520,9 +528,10 @@ async def edit_src_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     if chat_id is None or step is None:
         return ConversationHandler.END
     val = (update.message.text or "").strip()
-    if not SRC_DEST_RE.match(val):
+    pattern = SOURCE_RE if step == "source" else DEST_RE
+    if not pattern.match(val):
         await update.message.reply_text(
-            "❌ Формат chat_id:topic_id. Попробуйте ещё раз:",
+            "❌ Неверный формат. Попробуйте ещё раз:",
             reply_markup=cancel_inline(),
         )
         return EDIT_SOURCE_DEST
@@ -530,7 +539,7 @@ async def edit_src_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         context.user_data["edit_src_value"] = val
         context.user_data["edit_src_step"] = "dest"
         await update.message.reply_text(
-            "📤 Теперь введите новое назначение в формате chat_id:topic_id:",
+            "📤 Теперь введите новое назначение:\n" + DEST_HELP.split("\n", 1)[1],
             reply_markup=cancel_inline(),
         )
         return EDIT_SOURCE_DEST

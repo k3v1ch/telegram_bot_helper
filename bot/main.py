@@ -1,5 +1,9 @@
 import asyncio
 import logging
+import os
+import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from telegram import Update
 from telegram.ext import Application, ApplicationBuilder, ContextTypes
@@ -14,23 +18,72 @@ from bot.handlers import chats as chats_handlers
 from bot.handlers import digest as digest_handlers
 from bot.handlers import search as search_handlers
 from bot.handlers import start as start_handlers
+from bot.handlers import stats as stats_handlers
 from bot.scheduler import DigestScheduler, parse_chat_topic
 from bot.userbot.alerter import register_alert
 from bot.userbot.manager import UserbotManager
 
 logger = logging.getLogger("bot")
 
+USER_ERROR_TEXT = "❌ Произошла ошибка. Попробуйте позже."
+
 
 def setup_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    log_dir = Path("/app/logs")
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        log_dir = None
+
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    handlers: list[logging.Handler] = []
+    if log_dir is not None:
+        try:
+            file_handler = RotatingFileHandler(
+                log_dir / "digest.log",
+                maxBytes=5 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            )
+            file_handler.setFormatter(formatter)
+            handlers.append(file_handler)
+        except Exception:
+            pass
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    handlers.append(console_handler)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    for h in root_logger.handlers[:]:
+        root_logger.removeHandler(h)
+    for h in handlers:
+        root_logger.addHandler(h)
+
+
+async def _notify_user(update: object) -> None:
+    if not isinstance(update, Update):
+        return
+    try:
+        if update.callback_query is not None:
+            await update.callback_query.answer(USER_ERROR_TEXT, show_alert=True)
+            return
+        if update.effective_message is not None:
+            await update.effective_message.reply_text(USER_ERROR_TEXT)
+    except Exception:
+        logger.exception("Failed to notify user about error")
 
 
 async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Handler error", exc_info=context.error)
+
+    await _notify_user(update)
+
     admin_id = int(context.bot_data.get("admin_user_id", 0))
     if not admin_id:
         return
@@ -55,6 +108,8 @@ def _register_handlers(app: Application) -> None:
     for h in search_handlers.build_handlers():
         app.add_handler(h)
     for h in admin_handlers.build_handlers():
+        app.add_handler(h)
+    for h in stats_handlers.build_handlers():
         app.add_handler(h)
 
     app.add_handler(main_router)
@@ -82,6 +137,43 @@ async def _register_alerters(bot) -> None:
     logger.info(f"Registered {registered} alerters")
 
 
+async def _migrate_legacy_env(admin_user_id: int) -> None:
+    """One-shot migration from the legacy single-user env-driven config."""
+    old_phone = os.getenv("TELEGRAM_PHONE")
+    old_source = os.getenv("SOURCE")
+    old_dest = os.getenv("DEST")
+    old_lookback = os.getenv("LOOKBACK_HOURS")
+    old_time = os.getenv("DIGEST_TIME")
+
+    if not any([old_phone, old_source, old_dest, old_lookback, old_time]):
+        return
+    if not (old_source and old_dest):
+        return
+
+    async with get_session() as session:
+        existing = await crud.get_user_chats(session, admin_user_id)
+        if existing:
+            return
+        user = await crud.get_user(session, admin_user_id)
+        if user is None:
+            await crud.create_user(session, admin_user_id, None, "admin")
+        try:
+            lookback = int(old_lookback) if old_lookback else 24
+        except ValueError:
+            lookback = 24
+        await crud.create_chat(
+            session,
+            user_id=admin_user_id,
+            name="Migrated chat",
+            source=old_source,
+            dest=old_dest,
+            schedule_time=old_time or "09:00",
+            lookback_hours=lookback,
+        )
+
+    logger.info("Migrated existing config to DB")
+
+
 async def main() -> None:
     setup_logging()
     config = Config.from_env()
@@ -89,6 +181,8 @@ async def main() -> None:
 
     await init_db()
     logger.info("Database initialized")
+
+    await _migrate_legacy_env(config.admin_user_id)
 
     userbot.manager = UserbotManager(
         api_id=config.telegram_api_id,

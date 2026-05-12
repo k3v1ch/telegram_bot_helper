@@ -1,6 +1,6 @@
 from datetime import date as date_type, datetime, timedelta
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -196,6 +196,35 @@ async def get_last_digest(session: AsyncSession, chat_id: int) -> Digest | None:
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def get_last_user_digest(session: AsyncSession, user_id: int) -> Digest | None:
+    result = await session.execute(
+        select(Digest)
+        .where(Digest.user_id == user_id)
+        .order_by(Digest.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def count_user_digests(session: AsyncSession, user_id: int) -> int:
+    result = await session.execute(
+        select(func.count(Digest.id)).where(Digest.user_id == user_id)
+    )
+    return result.scalar_one() or 0
+
+
+async def count_user_digests_since(
+    session: AsyncSession, user_id: int, since: datetime
+) -> int:
+    result = await session.execute(
+        select(func.count(Digest.id)).where(
+            Digest.user_id == user_id,
+            Digest.created_at >= since,
+        )
+    )
+    return result.scalar_one() or 0
 
 
 # --- Stats ---

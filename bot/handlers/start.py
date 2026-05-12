@@ -127,12 +127,9 @@ async def main_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     if text == MAIN_STATS:
-        async with get_session() as session:
-            chats = await crud.get_user_chats(session, user_id)
-        lines = [f"📊 Ваша статистика:", f"Чатов: {len(chats)}"]
-        active = sum(1 for c in chats if c.is_active)
-        lines.append(f"Активных: {active}")
-        await update.message.reply_text("\n".join(lines))
+        from bot.handlers.stats import stats_show
+
+        await stats_show(update, context)
         return
 
     if text == MAIN_ADMIN and is_admin(user_id, context):

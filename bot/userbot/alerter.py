@@ -68,7 +68,7 @@ def register_alert(
     chat: Chat,
     bot: Bot,
     dest_chat_id: int,
-    dest_topic_id: int,
+    dest_topic_id: int | None,
 ) -> None:
     source_chat_id, source_topic_id = _parse_source(chat.source)
     thread_id = dest_topic_id or None

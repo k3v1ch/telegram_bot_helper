@@ -135,12 +135,15 @@ class UserbotManager:
             except asyncio.CancelledError:
                 raise
             for user_id, client in list(self._clients.items()):
+                if client.is_connected():
+                    continue
+                logger.warning(f"keep_alive: user {user_id} disconnected, reconnecting")
                 try:
-                    if not client.is_connected():
-                        logger.warning(f"Userbot for user {user_id} disconnected, reconnecting")
-                        await client.connect()
-                        if not await client.is_user_authorized():
-                            logger.warning(f"User {user_id} no longer authorized after reconnect")
-                            self._clients.pop(user_id, None)
+                    await self.stop_client(user_id)
+                    ok = await self.start_client(user_id)
+                    if ok:
+                        logger.info(f"keep_alive: user {user_id} reconnected")
+                    else:
+                        logger.warning(f"keep_alive: user {user_id} reconnect failed")
                 except Exception:
-                    logger.exception(f"keep_alive: failed to reconnect user {user_id}")
+                    logger.exception(f"keep_alive: reconnect raised for user {user_id}")
