@@ -95,12 +95,18 @@ async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 def _register_handlers(app: Application) -> None:
-    start_cmd, menu_cmd, back_cb, main_router = start_handlers.build_handlers()
+    from bot.handlers import accounts as accounts_handlers
+
+    start_cmd, menu_cmd, back_cb, gated_callbacks = start_handlers.build_handlers()
     app.add_handler(start_cmd)
     app.add_handler(menu_cmd)
     app.add_handler(back_cb)
+    for h in gated_callbacks:
+        app.add_handler(h)
 
     for h in auth_handlers.build_handlers():
+        app.add_handler(h)
+    for h in accounts_handlers.build_handlers():
         app.add_handler(h)
     for h in chats_handlers.build_handlers():
         app.add_handler(h)
@@ -113,7 +119,6 @@ def _register_handlers(app: Application) -> None:
     for h in stats_handlers.build_handlers():
         app.add_handler(h)
 
-    app.add_handler(main_router)
     app.add_error_handler(_error_handler)
 
 
@@ -124,12 +129,12 @@ async def _register_alerters(bot) -> None:
         chats = await crud.get_all_active_chats(session)
     registered = 0
     for chat in chats:
-        if not chat.alerts_enabled:
+        if not chat.alerts_enabled or chat.session_id is None:
             continue
         try:
-            if not await userbot.manager.is_connected(chat.user_id):
+            if not await userbot.manager.is_connected(chat.session_id):
                 continue
-            client = await userbot.manager.get_client(chat.user_id)
+            client = await userbot.manager.get_client(chat.session_id)
             dest_chat_id, dest_topic_id = parse_chat_topic(chat.dest)
             register_alert(client, chat, bot, dest_chat_id, dest_topic_id)
             registered += 1
@@ -168,11 +173,12 @@ async def _migrate_legacy_env(admin_user_id: int) -> None:
             name="Migrated chat",
             source=old_source,
             dest=old_dest,
+            session_id=None,
             schedule_time=old_time or "09:00",
             lookback_hours=lookback,
         )
 
-    logger.info("Migrated existing config to DB")
+    logger.info("Migrated existing config to DB (session_id is None — re-authorize via /start)")
 
 
 async def main() -> None:

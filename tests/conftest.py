@@ -15,12 +15,10 @@ def base_env(monkeypatch):
     env = {
         "TELEGRAM_API_ID": "12345",
         "TELEGRAM_API_HASH": "hashvalue",
-        "TELEGRAM_PHONE": "+70000000000",
-        "SOURCE": "-1001234567890:155",
-        "DEST": "-1001234567890:220",
         "GROQ_API_KEY": "groqkey",
         "BOT_TOKEN": "bottoken",
         "ADMIN_USER_ID": "999999",
+        "DATABASE_URL": "postgresql+asyncpg://test:test@localhost/test",
     }
     for k, v in env.items():
         monkeypatch.setenv(k, v)

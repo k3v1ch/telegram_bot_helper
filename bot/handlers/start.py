@@ -7,33 +7,26 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    MessageHandler,
-    filters,
 )
 
 from bot.db import crud
 from bot.db.database import get_session
 from bot.keyboards import (
+    CB_ADMIN,
     CB_BACK_MAIN,
-    MAIN_ACCOUNT,
-    MAIN_ADMIN,
-    MAIN_MY_CHATS,
-    MAIN_STATS,
-    account_menu,
-    admin_menu,
-    chats_list,
+    CB_CHATS,
+    CB_STATS,
     main_menu,
 )
 
 logger = logging.getLogger(__name__)
 
 BLOCKED_TEXT = "⛔ Ваш аккаунт заблокирован."
+NO_ACCOUNT_ALERT = "⚠️ Сначала подключите аккаунт Telegram"
 
 WELCOME_TEXT = (
     "👋 Добро пожаловать в Digest Bot!\n\n"
-    "Я помогаю собирать и анализировать сообщения из ваших Telegram-чатов "
-    "и присылать удобные сводки.\n\n"
-    "Чтобы начать, подключите свой аккаунт Telegram через меню 📱 Аккаунт."
+    "Я помогаю собирать и анализировать сообщения из Telegram-чатов."
 )
 
 
@@ -43,6 +36,12 @@ def _admin_user_id(context: ContextTypes.DEFAULT_TYPE) -> int:
 
 def is_admin(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     return user_id == _admin_user_id(context)
+
+
+async def _has_authorized_session(user_id: int) -> bool:
+    async with get_session() as session:
+        rows = await crud.get_authorized_sessions(session, user_id=user_id)
+    return len(rows) > 0
 
 
 def check_blocked(func: Callable):
@@ -71,6 +70,47 @@ def check_blocked(func: Callable):
     return wrapper
 
 
+def require_session(func: Callable):
+    """Block callback if user has no authorized session — show popup alert."""
+
+    @functools.wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user = update.effective_user
+        if user is None:
+            return
+        if not await _has_authorized_session(user.id):
+            if update.callback_query:
+                await update.callback_query.answer(NO_ACCOUNT_ALERT, show_alert=True)
+            elif update.message:
+                await update.message.reply_text(NO_ACCOUNT_ALERT)
+            return
+        return await func(update, context, *args, **kwargs)
+
+    return wrapper
+
+
+async def _send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool) -> None:
+    if update.effective_user is None:
+        return
+    user_id = update.effective_user.id
+    has_auth = await _has_authorized_session(user_id)
+    admin = is_admin(user_id, context)
+    markup = main_menu(is_admin=admin, has_authorized_sessions=has_auth)
+    text = WELCOME_TEXT if not has_auth else "📋 Главное меню"
+
+    if edit and update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=markup)
+            return
+        except Exception:
+            pass
+
+    if update.callback_query and update.callback_query.message:
+        await update.callback_query.message.reply_text(text, reply_markup=markup)
+    elif update.message:
+        await update.message.reply_text(text, reply_markup=markup)
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if user is None or update.message is None:
@@ -90,58 +130,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await update.message.reply_text(BLOCKED_TEXT)
             return
 
-    await update.message.reply_text(
-        WELCOME_TEXT,
-        reply_markup=main_menu(is_admin=is_admin(user.id, context)),
-    )
+    await _send_main_menu(update, context, edit=False)
 
 
 @check_blocked
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message is None or update.effective_user is None:
-        return
-    await update.message.reply_text(
-        "Главное меню:",
-        reply_markup=main_menu(is_admin=is_admin(update.effective_user.id, context)),
-    )
-
-
-@check_blocked
-async def main_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message is None or update.effective_user is None:
-        return
-    text = (update.message.text or "").strip()
-    user_id = update.effective_user.id
-
-    if text == MAIN_MY_CHATS:
-        async with get_session() as session:
-            chats = await crud.get_user_chats(session, user_id)
-        if not chats:
-            await update.message.reply_text(
-                "У вас пока нет чатов. Нажмите ➕ чтобы добавить.",
-                reply_markup=chats_list([]),
-            )
-        else:
-            await update.message.reply_text("Ваши чаты:", reply_markup=chats_list(chats))
-        return
-
-    if text == MAIN_ACCOUNT:
-        async with get_session() as session:
-            session_str = await crud.get_session_str(session, user_id)
-        authorized = bool(session_str)
-        title = "📱 Ваш аккаунт подключён" if authorized else "📱 Аккаунт не подключён"
-        await update.message.reply_text(title, reply_markup=account_menu(authorized))
-        return
-
-    if text == MAIN_STATS:
-        from bot.handlers.stats import stats_show
-
-        await stats_show(update, context)
-        return
-
-    if text == MAIN_ADMIN and is_admin(user_id, context):
-        await update.message.reply_text("👑 Админ панель", reply_markup=admin_menu())
-        return
+    await _send_main_menu(update, context, edit=False)
 
 
 @check_blocked
@@ -149,19 +143,49 @@ async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if update.callback_query is None:
         return
     await update.callback_query.answer()
-    try:
-        await update.callback_query.delete_message()
-    except Exception:
-        try:
-            await update.callback_query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
+    await _send_main_menu(update, context, edit=True)
 
 
-def build_handlers() -> list:
-    return [
+@check_blocked
+@require_session
+async def open_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Delegate to chats handler
+    from bot.handlers.chats import chats_show
+
+    await chats_show(update, context)
+
+
+@check_blocked
+@require_session
+async def open_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from bot.handlers.stats import stats_show_inline
+
+    await stats_show_inline(update, context)
+
+
+@check_blocked
+async def open_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user is None:
+        return
+    if not is_admin(update.effective_user.id, context):
+        if update.callback_query:
+            await update.callback_query.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    from bot.handlers.admin import admin_back
+
+    await admin_back(update, context)
+
+
+def build_handlers() -> tuple:
+    """Return the start command, menu command, back-to-main callback,
+    and the trio of gated callbacks (chats/stats/admin) registered before generic routers."""
+    return (
         CommandHandler("start", start_command),
         CommandHandler("menu", menu_command),
         CallbackQueryHandler(back_to_main, pattern=rf"^{CB_BACK_MAIN}$"),
-        MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_router),
-    ]
+        [
+            CallbackQueryHandler(open_chats, pattern=rf"^{CB_CHATS}$"),
+            CallbackQueryHandler(open_stats, pattern=rf"^{CB_STATS}$"),
+            CallbackQueryHandler(open_admin, pattern=rf"^{CB_ADMIN}$"),
+        ],
+    )

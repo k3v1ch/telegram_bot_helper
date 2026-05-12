@@ -276,19 +276,30 @@ class DigestScheduler:
         dest_chat_id: int,
         dest_topic_id: int | None,
     ):
+        if chat.session_id is None:
+            await _safe_send_error(
+                self.bot,
+                dest_chat_id,
+                dest_topic_id,
+                chat.name,
+                "Чат не привязан к аккаунту — перепривяжите через настройки.",
+            )
+            return None
+
+        sid = chat.session_id
         try:
-            if await self.manager.is_connected(chat.user_id):
-                return await self.manager.get_client(chat.user_id)
+            if await self.manager.is_connected(sid):
+                return await self.manager.get_client(sid)
         except Exception:
-            logger.exception(f"run_digest: get_client failed for user {chat.user_id}")
+            logger.exception(f"run_digest: get_client failed for session {sid}")
 
         logger.warning(
-            f"run_digest: user {chat.user_id} userbot offline, attempting reconnect"
+            f"run_digest: session {sid} userbot offline, attempting reconnect"
         )
         try:
-            ok = await self.manager.start_client(chat.user_id)
+            ok = await self.manager.start_client(sid)
         except Exception:
-            logger.exception(f"run_digest: start_client raised for user {chat.user_id}")
+            logger.exception(f"run_digest: start_client raised for session {sid}")
             ok = False
 
         if not ok:
@@ -301,9 +312,9 @@ class DigestScheduler:
             )
             return None
         try:
-            return await self.manager.get_client(chat.user_id)
+            return await self.manager.get_client(sid)
         except Exception:
-            logger.exception(f"run_digest: get_client after reconnect failed for {chat.user_id}")
+            logger.exception(f"run_digest: get_client after reconnect failed for session {sid}")
             return None
 
     async def _record_stats(self, chat: Chat, count: int) -> None:

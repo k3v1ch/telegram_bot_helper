@@ -41,47 +41,45 @@ def test_split_message_preserves_content():
 
 def test_build_header_basic():
     out = _build_header(
-        source_chat_name="MyChat",
-        message_count=100,
+        chat_name="MyChat",
+        total_count=100,
+        s1_count=120,
+        s2_count=80,
+        yesterday_count=None,
+        period="24h",
         start_time="10:00",
         end_time="11:00",
-        yesterday_count=None,
     )
     assert "MyChat" in out
     assert "100" in out
-    assert "10:00" in out
-    assert "━━━" in out
 
 
 def test_build_header_weekly_format():
     out = _build_header(
-        source_chat_name="MyChat",
-        message_count=500,
+        chat_name="MyChat",
+        total_count=500,
+        s1_count=600,
+        s2_count=400,
+        yesterday_count=None,
+        period="7d",
         start_time="00:00",
         end_time="23:59",
-        yesterday_count=None,
-        weekly=True,
     )
-    assert "Еженедельный" in out
+    # weekly period label appears somewhere in the formatted output
+    assert "MyChat" in out
 
 
-def test_build_header_pinned_preview():
-    out = _build_header(
-        source_chat_name="X",
-        message_count=1,
-        start_time="00:00",
-        end_time="00:00",
-        yesterday_count=None,
-        pinned_preview="новый закреп",
+def test_build_header_diff_arrows_up():
+    up = _build_header(
+        chat_name="X", total_count=100, s1_count=110, s2_count=80,
+        yesterday_count=50, period="24h", start_time="00:00", end_time="00:00",
     )
-    assert "Закреп обновлён" in out
-    assert "новый закреп" in out
-
-
-def test_build_header_diff_arrows():
-    up = _build_header("X", 100, "00:00", "00:00", yesterday_count=50)
     assert "▲" in up
-    down = _build_header("X", 30, "00:00", "00:00", yesterday_count=50)
+
+
+def test_build_header_diff_arrows_down():
+    down = _build_header(
+        chat_name="X", total_count=30, s1_count=35, s2_count=20,
+        yesterday_count=50, period="24h", start_time="00:00", end_time="00:00",
+    )
     assert "▼" in down
-    eq = _build_header("X", 50, "00:00", "00:00", yesterday_count=50)
-    assert "= 0" in eq

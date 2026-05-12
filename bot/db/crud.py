@@ -54,45 +54,69 @@ async def get_all_users(session: AsyncSession) -> list[User]:
 # --- Sessions ---
 
 
-async def get_session_str(session: AsyncSession, user_id: int) -> str | None:
+async def get_user_sessions(session: AsyncSession, user_id: int) -> list[UserSession]:
     result = await session.execute(
-        select(UserSession.session_string).where(UserSession.user_id == user_id)
-    )
-    return result.scalar_one_or_none()
-
-
-async def get_authorized_user_ids(session: AsyncSession) -> list[int]:
-    result = await session.execute(
-        select(UserSession.user_id).where(UserSession.is_authorized.is_(True))
+        select(UserSession)
+        .where(UserSession.user_id == user_id)
+        .order_by(UserSession.id)
     )
     return list(result.scalars().all())
 
 
-async def save_session(
+async def get_authorized_sessions(session: AsyncSession, user_id: int | None = None) -> list[UserSession]:
+    stmt = select(UserSession).where(UserSession.is_authorized.is_(True))
+    if user_id is not None:
+        stmt = stmt.where(UserSession.user_id == user_id)
+    result = await session.execute(stmt.order_by(UserSession.id))
+    return list(result.scalars().all())
+
+
+async def get_session_by_id(session: AsyncSession, session_id: int) -> UserSession | None:
+    result = await session.execute(select(UserSession).where(UserSession.id == session_id))
+    return result.scalar_one_or_none()
+
+
+async def create_session(
     session: AsyncSession,
     user_id: int,
     phone: str,
+    label: str,
+) -> UserSession:
+    row = UserSession(user_id=user_id, phone=phone, label=label)
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def update_session_credentials(
+    session: AsyncSession,
+    session_id: int,
     session_string: str,
+    authorized: bool,
 ) -> None:
-    stmt = pg_insert(UserSession).values(
-        user_id=user_id,
-        phone=phone,
-        session_string=session_string,
-    )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[UserSession.user_id],
-        set_={"phone": phone, "session_string": session_string},
-    )
-    await session.execute(stmt)
-
-
-async def set_authorized(session: AsyncSession, user_id: int, authorized: bool) -> None:
-    values: dict = {"is_authorized": authorized}
+    values: dict = {"session_string": session_string, "is_authorized": authorized}
     if authorized:
         values["authorized_at"] = datetime.utcnow()
     await session.execute(
-        update(UserSession).where(UserSession.user_id == user_id).values(**values)
+        update(UserSession).where(UserSession.id == session_id).values(**values)
     )
+
+
+async def update_session_label(session: AsyncSession, session_id: int, label: str) -> None:
+    await session.execute(
+        update(UserSession).where(UserSession.id == session_id).values(label=label)
+    )
+
+
+async def delete_session(session: AsyncSession, session_id: int) -> None:
+    await session.execute(delete(UserSession).where(UserSession.id == session_id))
+
+
+async def count_session_chats(session: AsyncSession, session_id: int) -> int:
+    result = await session.execute(
+        select(func.count(Chat.id)).where(Chat.session_id == session_id)
+    )
+    return result.scalar_one() or 0
 
 
 # --- Chats ---
@@ -114,11 +138,13 @@ async def create_chat(
     name: str,
     source: str,
     dest: str,
+    session_id: int | None = None,
     schedule_time: str = "05:00",
     lookback_hours: int = 24,
 ) -> Chat:
     chat = Chat(
         user_id=user_id,
+        session_id=session_id,
         name=name,
         source=source,
         dest=dest,

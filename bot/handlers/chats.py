@@ -14,30 +14,48 @@ from telegram.ext import (
 from bot import scheduler as scheduler_mod
 from bot.db import crud
 from bot.db.database import get_session
-from bot.handlers.start import check_blocked
+from bot.handlers.start import check_blocked, require_session
 from bot.keyboards import (
+    CB_ADD_HOURS_PREFIX,
+    CB_ADD_PROMPT_PREFIX,
+    CB_ADD_SESSION_PREFIX,
     CB_CANCEL,
+    CB_CHAT_ADD,
+    CB_CHAT_ALERTS,
+    CB_CHAT_DELETE,
+    CB_CHAT_DELETE_CONFIRM,
+    CB_CHAT_KEYWORDS,
+    CB_CHAT_KEYWORDS_EDIT,
+    CB_CHAT_OPEN,
+    CB_CHAT_SETTINGS,
+    CB_CHAT_TOGGLE,
+    CB_CHATS,
     back_to_chat,
     cancel_inline,
     chat_delete_confirm,
+    chat_keywords_menu,
     chat_menu,
     chat_settings,
     chats_list,
     hours_choice,
     prompt_choice,
+    session_choice,
 )
 from bot.states import (
     ADD_CHAT_DEST,
     ADD_CHAT_HOURS,
     ADD_CHAT_NAME,
     ADD_CHAT_PROMPT,
+    ADD_CHAT_SESSION,
     ADD_CHAT_SOURCE,
     ADD_CHAT_TIME,
     EDIT_HOURS,
+    EDIT_KEYWORDS,
     EDIT_PROMPT,
     EDIT_SOURCE_DEST,
     EDIT_TIME,
 )
+from bot.userbot.alerter import DEFAULT_KEYWORDS, parse_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -53,19 +71,225 @@ DEST_HELP = (
 )
 
 
-# ---------- Add chat conversation ----------
+# --- Chats list / detail ---------------------------------------------------
 
 
 @check_blocked
+@require_session
+async def chats_show(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query is None or update.effective_user is None:
+        return
+    await update.callback_query.answer()
+    user_id = update.effective_user.id
+    async with get_session() as session:
+        chats = await crud.get_user_chats(session, user_id)
+        sessions = await crud.get_user_sessions(session, user_id)
+
+    labels = {s.id: (s.label or "—") for s in sessions}
+    text = "💬 Ваши чаты" if chats else "У вас пока нет чатов. Нажмите ➕ чтобы добавить."
+    await update.callback_query.edit_message_text(
+        text,
+        reply_markup=chats_list(chats, labels),
+    )
+
+
+@check_blocked
+async def chat_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query is None or update.callback_query.data is None:
+        return
+    await update.callback_query.answer()
+    try:
+        chat_id = int(update.callback_query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return
+    async with get_session() as session:
+        chat = await crud.get_chat(session, chat_id)
+        if chat is None or update.effective_user is None or chat.user_id != update.effective_user.id:
+            await update.callback_query.edit_message_text("❌ Чат не найден.")
+            return
+        session_row = (
+            await crud.get_session_by_id(session, chat.session_id)
+            if chat.session_id else None
+        )
+
+    await update.callback_query.edit_message_text(
+        _chat_header(chat, session_row),
+        reply_markup=chat_menu(chat),
+    )
+
+
+def _chat_header(chat, session_row) -> str:
+    status = "✅ Активен" if chat.is_active else "⏸ На паузе"
+    alerts = "ВКЛ" if chat.alerts_enabled else "ВЫКЛ"
+    account = (
+        f"{session_row.label or 'Без имени'} ({session_row.phone or '—'})"
+        if session_row else "❗ не привязан"
+    )
+    keywords = parse_keywords(chat.alert_keywords)
+    kw_short = ", ".join(keywords[:3])
+    if len(keywords) > 3:
+        kw_short += f"… (+{len(keywords) - 3})"
+    return (
+        f"📋 {chat.name}\n"
+        f"📱 Аккаунт: {account}\n"
+        f"📥 Источник: {chat.source}\n"
+        f"📤 Назначение: {chat.dest}\n"
+        f"🕐 Расписание: {chat.schedule_time} МСК\n"
+        f"📏 Период: {chat.lookback_hours}ч\n"
+        f"⚡ Алерты: {alerts}\n"
+        f"🔑 Ключевые слова: {kw_short}\n"
+        f"Статус: {status}"
+    )
+
+
+@check_blocked
+async def chat_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query is None or update.callback_query.data is None:
+        return
+    await update.callback_query.answer()
+    try:
+        chat_id = int(update.callback_query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return
+    async with get_session() as session:
+        chat = await crud.get_chat(session, chat_id)
+        if chat is None or update.effective_user is None or chat.user_id != update.effective_user.id:
+            await update.callback_query.edit_message_text("❌ Чат не найден.")
+            return
+        new_state = not chat.is_active
+        await crud.update_chat(session, chat_id, is_active=new_state)
+        chat.is_active = new_state
+        session_row = (
+            await crud.get_session_by_id(session, chat.session_id) if chat.session_id else None
+        )
+
+    if scheduler_mod.scheduler is not None:
+        if new_state:
+            scheduler_mod.scheduler.resume_chat_jobs(chat_id)
+        else:
+            scheduler_mod.scheduler.pause_chat_jobs(chat_id)
+
+    await update.callback_query.edit_message_text(
+        _chat_header(chat, session_row),
+        reply_markup=chat_menu(chat),
+    )
+
+
+@check_blocked
+async def chat_alerts_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query is None or update.callback_query.data is None:
+        return
+    await update.callback_query.answer()
+    try:
+        chat_id = int(update.callback_query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return
+    async with get_session() as session:
+        chat = await crud.get_chat(session, chat_id)
+        if chat is None or update.effective_user is None or chat.user_id != update.effective_user.id:
+            await update.callback_query.edit_message_text("❌ Чат не найден.")
+            return
+        new_state = not chat.alerts_enabled
+        await crud.update_chat(session, chat_id, alerts_enabled=new_state)
+        chat.alerts_enabled = new_state
+        session_row = (
+            await crud.get_session_by_id(session, chat.session_id) if chat.session_id else None
+        )
+
+    await update.callback_query.edit_message_text(
+        _chat_header(chat, session_row),
+        reply_markup=chat_menu(chat),
+    )
+
+
+@check_blocked
+async def chat_settings_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query is None or update.callback_query.data is None:
+        return
+    await update.callback_query.answer()
+    try:
+        chat_id = int(update.callback_query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return
+    await update.callback_query.edit_message_text(
+        "⚙️ Настройки чата:",
+        reply_markup=chat_settings(chat_id),
+    )
+
+
+@check_blocked
+async def chat_keywords_show(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query is None or update.callback_query.data is None:
+        return
+    await update.callback_query.answer()
+    try:
+        chat_id = int(update.callback_query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return
+    async with get_session() as session:
+        chat = await crud.get_chat(session, chat_id)
+        if chat is None or update.effective_user is None or chat.user_id != update.effective_user.id:
+            await update.callback_query.edit_message_text("❌ Чат не найден.")
+            return
+    kws = parse_keywords(chat.alert_keywords)
+    note = "" if chat.alert_keywords else " (по умолчанию)"
+    text = (
+        "🔔 Ключевые слова для алертов\n\n"
+        f"Текущие{note}:\n{', '.join(kws)}\n\n"
+        "Алерты срабатывают когда сообщение содержит одно из этих слов."
+    )
+    await update.callback_query.edit_message_text(
+        text,
+        reply_markup=chat_keywords_menu(chat_id),
+    )
+
+
+@check_blocked
+async def chat_delete_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query is None or update.callback_query.data is None:
+        return
+    await update.callback_query.answer()
+    try:
+        chat_id = int(update.callback_query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return
+    await update.callback_query.edit_message_text(
+        "🗑 Удалить чат? Это действие необратимо.",
+        reply_markup=chat_delete_confirm(chat_id),
+    )
+
+
+@check_blocked
+async def chat_delete_apply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query is None or update.callback_query.data is None:
+        return
+    await update.callback_query.answer()
+    try:
+        chat_id = int(update.callback_query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return
+    async with get_session() as session:
+        chat = await crud.get_chat(session, chat_id)
+        if chat is None or update.effective_user is None or chat.user_id != update.effective_user.id:
+            await update.callback_query.edit_message_text("❌ Чат не найден.")
+            return
+        await crud.delete_chat(session, chat_id)
+
+    if scheduler_mod.scheduler is not None:
+        scheduler_mod.scheduler.remove_chat_jobs(chat_id)
+
+    await update.callback_query.edit_message_text("🗑 Чат удалён.")
+
+
+# --- Add chat conversation -------------------------------------------------
+
+
+@check_blocked
+@require_session
 async def add_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(
-            "📝 Введите название чата:",
-            reply_markup=cancel_inline(),
-        )
-    elif update.message:
-        await update.message.reply_text(
             "📝 Введите название чата:",
             reply_markup=cancel_inline(),
         )
@@ -75,17 +299,52 @@ async def add_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 @check_blocked
 async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message is None:
+    if update.message is None or update.effective_user is None:
         return ADD_CHAT_NAME
     name = (update.message.text or "").strip()
     if not name or len(name) > 255:
         await update.message.reply_text(
-            "❌ Название должно быть от 1 до 255 символов. Введите ещё раз:",
+            "❌ Название от 1 до 255 символов. Введите ещё раз:",
             reply_markup=cancel_inline(),
         )
         return ADD_CHAT_NAME
     context.user_data["add_chat"]["name"] = name
+
+    async with get_session() as session:
+        sessions = await crud.get_authorized_sessions(session, user_id=update.effective_user.id)
+
+    if not sessions:
+        await update.message.reply_text(
+            "❌ Нет авторизованных аккаунтов. Сначала подключите аккаунт.",
+        )
+        return ConversationHandler.END
+
+    if len(sessions) == 1:
+        context.user_data["add_chat"]["session_id"] = sessions[0].id
+        await update.message.reply_text(
+            "📥 Введите источник в формате chat_id:topic_id\nНапример: -1003332852289:155",
+            reply_markup=cancel_inline(),
+        )
+        return ADD_CHAT_SOURCE
+
     await update.message.reply_text(
+        "📱 Выберите аккаунт для этого чата:",
+        reply_markup=session_choice(sessions),
+    )
+    return ADD_CHAT_SESSION
+
+
+@check_blocked
+async def add_session_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.callback_query is None or update.callback_query.data is None:
+        return ADD_CHAT_SESSION
+    await update.callback_query.answer()
+    try:
+        session_id = int(update.callback_query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return ADD_CHAT_SESSION
+    context.user_data["add_chat"]["session_id"] = session_id
+    await update.callback_query.edit_message_text(
         "📥 Введите источник в формате chat_id:topic_id\nНапример: -1003332852289:155",
         reply_markup=cancel_inline(),
     )
@@ -104,10 +363,7 @@ async def add_source(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ADD_CHAT_SOURCE
     context.user_data["add_chat"]["source"] = src
-    await update.message.reply_text(
-        DEST_HELP,
-        reply_markup=cancel_inline(),
-    )
+    await update.message.reply_text(DEST_HELP, reply_markup=cancel_inline())
     return ADD_CHAT_DEST
 
 
@@ -124,7 +380,7 @@ async def add_dest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ADD_CHAT_DEST
     context.user_data["add_chat"]["dest"] = dst
     await update.message.reply_text(
-        "🕐 Введите время отправки в формате HH:MM (по МСК), например 09:00:",
+        "🕐 Введите время отправки HH:MM (МСК), например 05:00:",
         reply_markup=cancel_inline(),
     )
     return ADD_CHAT_TIME
@@ -142,28 +398,22 @@ async def add_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ADD_CHAT_TIME
     context.user_data["add_chat"]["schedule_time"] = t
-    await update.message.reply_text(
-        "📏 Выберите период анализа:",
-        reply_markup=hours_choice(),
-    )
+    await update.message.reply_text("📏 Выберите период анализа:", reply_markup=hours_choice())
     return ADD_CHAT_HOURS
 
 
 @check_blocked
 async def add_hours(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.callback_query is None:
+    if update.callback_query is None or update.callback_query.data is None:
         return ADD_CHAT_HOURS
     await update.callback_query.answer()
-    data = update.callback_query.data or ""
-    if not data.startswith("add_hours:"):
-        return ADD_CHAT_HOURS
     try:
-        hours = int(data.split(":", 1)[1])
-    except ValueError:
+        hours = int(update.callback_query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
         return ADD_CHAT_HOURS
     context.user_data["add_chat"]["lookback_hours"] = hours
     await update.callback_query.edit_message_text(
-        "💬 Хотите задать кастомный промпт для AI или использовать стандартный?",
+        "💬 Хотите задать свой промпт для AI или использовать стандартный?",
         reply_markup=prompt_choice(),
     )
     return ADD_CHAT_PROMPT
@@ -171,16 +421,16 @@ async def add_hours(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 @check_blocked
 async def add_prompt_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.callback_query is None:
+    if update.callback_query is None or update.callback_query.data is None:
         return ADD_CHAT_PROMPT
     await update.callback_query.answer()
-    data = update.callback_query.data or ""
-    if data == "add_prompt:default":
+    data = update.callback_query.data
+    if data == f"{CB_ADD_PROMPT_PREFIX}:default":
         context.user_data["add_chat"]["custom_prompt"] = None
         return await _finalize_add(update, context)
-    if data == "add_prompt:custom":
+    if data == f"{CB_ADD_PROMPT_PREFIX}:custom":
         await update.callback_query.edit_message_text(
-            "📝 Введите свой промпт (текст инструкции для AI):",
+            "📝 Введите свой промпт (инструкции для AI):",
             reply_markup=cancel_inline(),
         )
         return ADD_CHAT_PROMPT
@@ -210,6 +460,7 @@ async def _finalize_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             name=data.get("name", "chat"),
             source=data.get("source", ""),
             dest=data.get("dest", ""),
+            session_id=data.get("session_id"),
             schedule_time=data.get("schedule_time", "05:00"),
             lookback_hours=data.get("lookback_hours", 24),
         )
@@ -249,145 +500,7 @@ async def add_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
-# ---------- Chat list / menu / settings ----------
-
-
-@check_blocked
-async def chats_list_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.callback_query is None or update.effective_user is None:
-        return
-    await update.callback_query.answer()
-    async with get_session() as session:
-        chats = await crud.get_user_chats(session, update.effective_user.id)
-    await update.callback_query.edit_message_text(
-        "Ваши чаты:" if chats else "У вас пока нет чатов. Нажмите ➕ чтобы добавить.",
-        reply_markup=chats_list(chats),
-    )
-
-
-@check_blocked
-async def chat_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.callback_query is None:
-        return
-    await update.callback_query.answer()
-    chat_id = int(update.callback_query.data.split(":")[1])
-    async with get_session() as session:
-        chat = await crud.get_chat(session, chat_id)
-    if chat is None or chat.user_id != update.effective_user.id:
-        await update.callback_query.edit_message_text("❌ Чат не найден.")
-        return
-    await update.callback_query.edit_message_text(
-        _chat_header(chat),
-        reply_markup=chat_menu(chat),
-    )
-
-
-def _chat_header(chat) -> str:
-    status = "✅ Активен" if chat.is_active else "⏸ На паузе"
-    alerts = "ВКЛ" if chat.alerts_enabled else "ВЫКЛ"
-    return (
-        f"📋 {chat.name}\n"
-        f"📥 Источник: {chat.source}\n"
-        f"📤 Назначение: {chat.dest}\n"
-        f"🕐 Расписание: {chat.schedule_time} МСК\n"
-        f"📏 Период: {chat.lookback_hours}ч\n"
-        f"⚡ Алерты: {alerts}\n"
-        f"Статус: {status}"
-    )
-
-
-@check_blocked
-async def chat_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.callback_query is None:
-        return
-    await update.callback_query.answer()
-    chat_id = int(update.callback_query.data.split(":")[1])
-    async with get_session() as session:
-        chat = await crud.get_chat(session, chat_id)
-        if chat is None or chat.user_id != update.effective_user.id:
-            await update.callback_query.edit_message_text("❌ Чат не найден.")
-            return
-        new_state = not chat.is_active
-        await crud.update_chat(session, chat_id, is_active=new_state)
-        chat.is_active = new_state
-
-    if scheduler_mod.scheduler is not None:
-        if new_state:
-            scheduler_mod.scheduler.resume_chat_jobs(chat_id)
-        else:
-            scheduler_mod.scheduler.pause_chat_jobs(chat_id)
-
-    await update.callback_query.edit_message_text(
-        _chat_header(chat),
-        reply_markup=chat_menu(chat),
-    )
-
-
-@check_blocked
-async def chat_alerts_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.callback_query is None:
-        return
-    await update.callback_query.answer()
-    chat_id = int(update.callback_query.data.split(":")[1])
-    async with get_session() as session:
-        chat = await crud.get_chat(session, chat_id)
-        if chat is None or chat.user_id != update.effective_user.id:
-            await update.callback_query.edit_message_text("❌ Чат не найден.")
-            return
-        new_state = not chat.alerts_enabled
-        await crud.update_chat(session, chat_id, alerts_enabled=new_state)
-        chat.alerts_enabled = new_state
-
-    await update.callback_query.edit_message_text(
-        _chat_header(chat),
-        reply_markup=chat_menu(chat),
-    )
-
-
-@check_blocked
-async def chat_settings_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.callback_query is None:
-        return
-    await update.callback_query.answer()
-    chat_id = int(update.callback_query.data.split(":")[1])
-    await update.callback_query.edit_message_text(
-        "⚙️ Настройки чата:",
-        reply_markup=chat_settings(chat_id),
-    )
-
-
-@check_blocked
-async def chat_delete_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.callback_query is None:
-        return
-    await update.callback_query.answer()
-    chat_id = int(update.callback_query.data.split(":")[1])
-    await update.callback_query.edit_message_text(
-        "🗑 Удалить чат? Это действие необратимо.",
-        reply_markup=chat_delete_confirm(chat_id),
-    )
-
-
-@check_blocked
-async def chat_delete_apply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.callback_query is None:
-        return
-    await update.callback_query.answer()
-    chat_id = int(update.callback_query.data.split(":")[1])
-    async with get_session() as session:
-        chat = await crud.get_chat(session, chat_id)
-        if chat is None or chat.user_id != update.effective_user.id:
-            await update.callback_query.edit_message_text("❌ Чат не найден.")
-            return
-        await crud.delete_chat(session, chat_id)
-
-    if scheduler_mod.scheduler is not None:
-        scheduler_mod.scheduler.remove_chat_jobs(chat_id)
-
-    await update.callback_query.edit_message_text("🗑 Чат удалён.")
-
-
-# ---------- Edit conversations ----------
+# --- Edit conversations ----------------------------------------------------
 
 
 def _parse_chat_id(data: str) -> int:
@@ -399,7 +512,7 @@ async def edit_prompt_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if update.callback_query is None:
         return ConversationHandler.END
     await update.callback_query.answer()
-    chat_id = _parse_chat_id(update.callback_query.data)
+    chat_id = _parse_chat_id(update.callback_query.data or "")
     context.user_data["edit_chat_id"] = chat_id
     await update.callback_query.edit_message_text(
         "✏️ Введите новый промпт:",
@@ -428,10 +541,10 @@ async def edit_time_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if update.callback_query is None:
         return ConversationHandler.END
     await update.callback_query.answer()
-    chat_id = _parse_chat_id(update.callback_query.data)
+    chat_id = _parse_chat_id(update.callback_query.data or "")
     context.user_data["edit_chat_id"] = chat_id
     await update.callback_query.edit_message_text(
-        "🕐 Введите новое время в формате HH:MM:",
+        "🕐 Введите новое время HH:MM:",
         reply_markup=cancel_inline(),
     )
     return EDIT_TIME
@@ -466,7 +579,7 @@ async def edit_hours_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if update.callback_query is None:
         return ConversationHandler.END
     await update.callback_query.answer()
-    chat_id = _parse_chat_id(update.callback_query.data)
+    chat_id = _parse_chat_id(update.callback_query.data or "")
     context.user_data["edit_chat_id"] = chat_id
     await update.callback_query.edit_message_text(
         "📏 Введите период в часах (1–168):",
@@ -482,9 +595,8 @@ async def edit_hours_save(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     chat_id = context.user_data.get("edit_chat_id")
     if chat_id is None:
         return ConversationHandler.END
-    raw = (update.message.text or "").strip()
     try:
-        hours = int(raw)
+        hours = int((update.message.text or "").strip())
     except ValueError:
         await update.message.reply_text(
             "❌ Введите число от 1 до 168:",
@@ -509,11 +621,11 @@ async def edit_src_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if update.callback_query is None:
         return ConversationHandler.END
     await update.callback_query.answer()
-    chat_id = _parse_chat_id(update.callback_query.data)
+    chat_id = _parse_chat_id(update.callback_query.data or "")
     context.user_data["edit_chat_id"] = chat_id
     context.user_data["edit_src_step"] = "source"
     await update.callback_query.edit_message_text(
-        "📥 Введите новый источник в формате chat_id:topic_id:",
+        "📥 Введите новый источник chat_id:topic_id:",
         reply_markup=cancel_inline(),
     )
     return EDIT_SOURCE_DEST
@@ -550,9 +662,42 @@ async def edit_src_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "✅ Источник и назначение обновлены.",
         reply_markup=back_to_chat(chat_id),
     )
+    for k in ("edit_chat_id", "edit_src_step", "edit_src_value"):
+        context.user_data.pop(k, None)
+    return ConversationHandler.END
+
+
+@check_blocked
+async def edit_keywords_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.callback_query is None:
+        return ConversationHandler.END
+    await update.callback_query.answer()
+    chat_id = _parse_chat_id(update.callback_query.data or "")
+    context.user_data["edit_chat_id"] = chat_id
+    default_hint = ", ".join(DEFAULT_KEYWORDS)
+    await update.callback_query.edit_message_text(
+        "🔔 Введите ключевые слова через запятую.\n"
+        f"Пример (стандартные): {default_hint}\n\n"
+        "Пустой ответ — вернуть стандартные.",
+        reply_markup=cancel_inline(),
+    )
+    return EDIT_KEYWORDS
+
+
+@check_blocked
+async def edit_keywords_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.message is None:
+        return EDIT_KEYWORDS
+    chat_id = context.user_data.get("edit_chat_id")
+    if chat_id is None:
+        return ConversationHandler.END
+    raw = (update.message.text or "").strip()
+    value = raw if raw else None
+    async with get_session() as session:
+        await crud.update_chat(session, chat_id, alert_keywords=value)
+    msg = "✅ Ключевые слова обновлены." if value else "✅ Возвращены стандартные ключевые слова."
+    await update.message.reply_text(msg, reply_markup=back_to_chat(chat_id))
     context.user_data.pop("edit_chat_id", None)
-    context.user_data.pop("edit_src_step", None)
-    context.user_data.pop("edit_src_value", None)
     return ConversationHandler.END
 
 
@@ -570,20 +715,21 @@ async def edit_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return ConversationHandler.END
 
 
-# ---------- Handler factory ----------
+# --- Handler factory -------------------------------------------------------
 
 
 def build_add_conversation() -> ConversationHandler:
     return ConversationHandler(
-        entry_points=[CallbackQueryHandler(add_entry, pattern=r"^chat_add$")],
+        entry_points=[CallbackQueryHandler(add_entry, pattern=rf"^{CB_CHAT_ADD}$")],
         states={
             ADD_CHAT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
+            ADD_CHAT_SESSION: [CallbackQueryHandler(add_session_pick, pattern=rf"^{CB_ADD_SESSION_PREFIX}:\d+$")],
             ADD_CHAT_SOURCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_source)],
             ADD_CHAT_DEST: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_dest)],
             ADD_CHAT_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_time)],
-            ADD_CHAT_HOURS: [CallbackQueryHandler(add_hours, pattern=r"^add_hours:\d+$")],
+            ADD_CHAT_HOURS: [CallbackQueryHandler(add_hours, pattern=rf"^{CB_ADD_HOURS_PREFIX}:\d+$")],
             ADD_CHAT_PROMPT: [
-                CallbackQueryHandler(add_prompt_choice, pattern=r"^add_prompt:(default|custom)$"),
+                CallbackQueryHandler(add_prompt_choice, pattern=rf"^{CB_ADD_PROMPT_PREFIX}:(default|custom)$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_prompt_text),
             ],
         },
@@ -630,6 +776,13 @@ def build_edit_conversations() -> list[ConversationHandler]:
             name="edit_src",
             persistent=False,
         ),
+        ConversationHandler(
+            entry_points=[CallbackQueryHandler(edit_keywords_entry, pattern=rf"^{CB_CHAT_KEYWORDS_EDIT}:\d+$")],
+            states={EDIT_KEYWORDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_keywords_save)]},
+            fallbacks=fallbacks,
+            name="edit_keywords",
+            persistent=False,
+        ),
     ]
 
 
@@ -637,11 +790,11 @@ def build_handlers() -> list:
     return [
         build_add_conversation(),
         *build_edit_conversations(),
-        CallbackQueryHandler(chats_list_cb, pattern=r"^chats_list$"),
-        CallbackQueryHandler(chat_open, pattern=r"^chat:\d+$"),
-        CallbackQueryHandler(chat_toggle, pattern=r"^chat_toggle:\d+$"),
-        CallbackQueryHandler(chat_alerts_toggle, pattern=r"^chat_alerts:\d+$"),
-        CallbackQueryHandler(chat_settings_cb, pattern=r"^chat_settings:\d+$"),
-        CallbackQueryHandler(chat_delete_ask, pattern=r"^chat_delete:\d+$"),
-        CallbackQueryHandler(chat_delete_apply, pattern=r"^chat_delete_confirm:\d+$"),
+        CallbackQueryHandler(chat_open, pattern=rf"^{CB_CHAT_OPEN}:\d+$"),
+        CallbackQueryHandler(chat_toggle, pattern=rf"^{CB_CHAT_TOGGLE}:\d+$"),
+        CallbackQueryHandler(chat_alerts_toggle, pattern=rf"^{CB_CHAT_ALERTS}:\d+$"),
+        CallbackQueryHandler(chat_settings_cb, pattern=rf"^{CB_CHAT_SETTINGS}:\d+$"),
+        CallbackQueryHandler(chat_keywords_show, pattern=rf"^{CB_CHAT_KEYWORDS}:\d+$"),
+        CallbackQueryHandler(chat_delete_ask, pattern=rf"^{CB_CHAT_DELETE}:\d+$"),
+        CallbackQueryHandler(chat_delete_apply, pattern=rf"^{CB_CHAT_DELETE_CONFIRM}:\d+$"),
     ]

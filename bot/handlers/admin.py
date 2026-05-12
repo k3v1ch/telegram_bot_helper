@@ -93,16 +93,16 @@ async def admin_user_open(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await update.callback_query.edit_message_text("❌ Пользователь не найден.")
             return
         chats = await crud.get_user_chats(session, user_id)
-        session_str = await crud.get_session_str(session, user_id)
+        sessions = await crud.get_user_sessions(session, user_id)
 
     display = user.username or user.first_name or str(user.user_id)
     status = "🚫 Заблокирован" if user.is_blocked else "✅ Активен"
-    authorized = "да" if session_str else "нет"
+    authorized = sum(1 for s in sessions if s.is_authorized)
     text = (
         f"👤 {display}\n"
         f"ID: {user.user_id}\n"
         f"Статус: {status}\n"
-        f"Авторизован: {authorized}\n"
+        f"Аккаунтов: {len(sessions)} (авторизованы: {authorized})\n"
         f"Чатов: {len(chats)}"
     )
     await update.callback_query.edit_message_text(
@@ -133,9 +133,9 @@ async def admin_block(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if new_blocked:
         if userbot.manager is not None:
             try:
-                await userbot.manager.stop_client(user_id)
+                await userbot.manager.stop_user(user_id)
             except Exception:
-                logger.exception("stop_client failed during block")
+                logger.exception("stop_user failed during block")
         if scheduler_mod.scheduler is not None:
             scheduler_mod.scheduler.remove_user_jobs([c.id for c in chats])
 
@@ -211,15 +211,24 @@ async def admin_user_reconnect(update: Update, context: ContextTypes.DEFAULT_TYP
     except (ValueError, IndexError):
         return
 
-    ok = False
+    reconnected = 0
+    total = 0
     if userbot.manager is not None:
         try:
-            await userbot.manager.stop_client(user_id)
-            ok = await userbot.manager.start_client(user_id)
+            async with get_session() as db:
+                sessions = await crud.get_authorized_sessions(db, user_id=user_id)
+            total = len(sessions)
+            for s in sessions:
+                try:
+                    await userbot.manager.stop_client(s.id)
+                    if await userbot.manager.start_client(s.id):
+                        reconnected += 1
+                except Exception:
+                    logger.exception(f"admin reconnect failed for session {s.id}")
         except Exception:
-            logger.exception("admin reconnect failed")
+            logger.exception("admin reconnect: failed to list sessions")
 
-    text = "✅ Сессия переподключена." if ok else "❌ Не удалось переподключить сессию."
+    text = f"✅ Переподключено {reconnected}/{total} сессий." if total else "❌ У пользователя нет авторизованных сессий."
     async with get_session() as session:
         user = await crud.get_user(session, user_id)
     blocked = user.is_blocked if user else False
