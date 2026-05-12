@@ -136,8 +136,8 @@ async def admin_block(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await userbot.manager.stop_client(user_id)
             except Exception:
                 logger.exception("stop_client failed during block")
-        if scheduler_mod.manager is not None:
-            scheduler_mod.manager.remove_user_jobs([c.id for c in chats])
+        if scheduler_mod.scheduler is not None:
+            scheduler_mod.scheduler.remove_user_jobs([c.id for c in chats])
 
     await admin_user_open(update, context)
 

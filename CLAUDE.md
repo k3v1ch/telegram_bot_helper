@@ -52,7 +52,32 @@ bot/
     search.py             # archive search
 ```
 
-The legacy single-user modules (`digest_bot.py`, `digest_store.py`, `state.py`, `stats.py`, `pinned.py`, `health.py`, `atomic_io.py`, plus the original top-level `reader.py` / `alerter.py`) remain untouched while the refactor is in progress. They will be removed once the new modules replace them.
+The legacy single-user modules (`digest_bot.py`, `digest_store.py`, `state.py`, `stats.py`, `pinned.py`, `health.py`, `atomic_io.py`, plus the original top-level `reader.py` / `alerter.py`) remain untouched while the refactor is in progress. They are unused by the new pipeline and can be removed in a follow-up cleanup.
+
+## Pipeline flow
+
+`DigestScheduler` (in `bot/scheduler.py`) is the single owner of the full pipeline for both scheduled and on-demand digests. `handlers/digest.py` just resolves the chat and calls `scheduler.run_digest(chat_id, hours)`.
+
+`run_digest` steps:
+1. Load `Chat` and `User` from DB; bail if missing / inactive / blocked.
+2. `manager.get_client(chat.user_id)` — Telethon client for that user.
+3. Parse `chat.source` / `chat.dest` → `(chat_id, topic_id)`.
+4. `reader.fetch_messages(...)` returns `(messages, pinned_changed, pinned_text)`; previous pinned text comes from `crud.get_pinned`.
+5. If pinned changed: send "📌 Закреп обновлён" header via bot, forward pinned via userbot client (fallback to text on permission errors), `crud.upsert_pinned`.
+6. If no messages → `sender.send_empty_notice` + `crud.upsert_daily_stats`, done.
+7. `analyzer.analyze(messages, custom_prompt=chat.custom_prompt, weekly=...)` → `(digest_text, s2_count)`.
+8. `crud.get_stats_yesterday`, then `sender.send_digest` with full header.
+9. `crud.save_digest` + `crud.upsert_daily_stats`.
+
+`analyzer.init(api_key)` must be called once at startup (done in `main.py`).
+
+## Realtime alerts
+
+`alerter.register_alert(client, chat, bot, dest_chat_id, dest_topic_id)` attaches a Telethon `NewMessage` event handler to the user's client. `main.py` registers an alerter for every active chat that has `alerts_enabled=True` after `manager.start_all()` completes.
+
+## Keep-alive
+
+`UserbotManager.keep_alive()` is a coroutine launched from `main.py` after polling starts. Every 5 minutes it reconnects any Telethon client whose `is_connected()` returned False, and drops it from `_clients` if reconnect leaves the session unauthorized.
 
 ## Database schema
 

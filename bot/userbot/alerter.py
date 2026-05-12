@@ -2,8 +2,8 @@ import logging
 import re
 import time
 from datetime import timedelta, timezone
-from typing import Awaitable, Callable
 
+from telegram import Bot
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageService
 
@@ -66,9 +66,12 @@ def _check_alert(chat_id: int, text: str, sender: str) -> bool:
 def register_alert(
     client: TelegramClient,
     chat: Chat,
-    bot_send_func: Callable[[str], Awaitable[None]],
+    bot: Bot,
+    dest_chat_id: int,
+    dest_topic_id: int,
 ) -> None:
     source_chat_id, source_topic_id = _parse_source(chat.source)
+    thread_id = dest_topic_id or None
 
     @client.on(events.NewMessage(chats=source_chat_id))
     async def handler(event):
@@ -102,7 +105,11 @@ def register_alert(
         )
 
         try:
-            await bot_send_func(alert_text)
+            await bot.send_message(
+                chat_id=dest_chat_id,
+                text=alert_text,
+                message_thread_id=thread_id,
+            )
             logger.info(f"Alert sent for chat {chat.id}: {sender_name} at {msg_time}")
         except Exception:
             logger.exception(f"Failed to send alert for chat {chat.id}")

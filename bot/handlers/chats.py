@@ -209,9 +209,9 @@ async def _finalize_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             await crud.update_chat(session, chat.id, custom_prompt=data["custom_prompt"])
             chat.custom_prompt = data["custom_prompt"]
 
-    if scheduler_mod.manager is not None:
+    if scheduler_mod.scheduler is not None:
         try:
-            scheduler_mod.manager.add_chat_job(chat)
+            scheduler_mod.scheduler.add_chat_job(chat)
         except Exception:
             logger.exception("Failed to schedule new chat")
 
@@ -303,11 +303,11 @@ async def chat_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await crud.update_chat(session, chat_id, is_active=new_state)
         chat.is_active = new_state
 
-    if scheduler_mod.manager is not None:
+    if scheduler_mod.scheduler is not None:
         if new_state:
-            scheduler_mod.manager.resume_chat_job(chat_id)
+            scheduler_mod.scheduler.resume_chat_jobs(chat_id)
         else:
-            scheduler_mod.manager.pause_chat_job(chat_id)
+            scheduler_mod.scheduler.pause_chat_jobs(chat_id)
 
     await update.callback_query.edit_message_text(
         _chat_header(chat),
@@ -373,8 +373,8 @@ async def chat_delete_apply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
         await crud.delete_chat(session, chat_id)
 
-    if scheduler_mod.manager is not None:
-        scheduler_mod.manager.remove_chat_job(chat_id)
+    if scheduler_mod.scheduler is not None:
+        scheduler_mod.scheduler.remove_chat_jobs(chat_id)
 
     await update.callback_query.edit_message_text("🗑 Чат удалён.")
 
@@ -446,8 +446,8 @@ async def edit_time_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     async with get_session() as session:
         await crud.update_chat(session, chat_id, schedule_time=t)
         chat = await crud.get_chat(session, chat_id)
-    if scheduler_mod.manager is not None and chat is not None:
-        scheduler_mod.manager.add_chat_job(chat)
+    if scheduler_mod.scheduler is not None and chat is not None:
+        scheduler_mod.scheduler.reschedule_chat(chat)
     await update.message.reply_text("✅ Расписание обновлено.", reply_markup=back_to_chat(chat_id))
     context.user_data.pop("edit_chat_id", None)
     return ConversationHandler.END

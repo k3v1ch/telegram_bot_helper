@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import AsyncContextManager, Callable
 
@@ -11,6 +12,8 @@ from bot.db import crud
 logger = logging.getLogger(__name__)
 
 SessionFactory = Callable[[], AsyncContextManager[AsyncSession]]
+
+KEEP_ALIVE_INTERVAL_SEC = 300
 
 
 class UserbotManager:
@@ -124,3 +127,20 @@ class UserbotManager:
             await crud.save_session(session, user_id, "", "")
             await crud.set_authorized(session, user_id, False)
         logger.info(f"User {user_id} session revoked")
+
+    async def keep_alive(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(KEEP_ALIVE_INTERVAL_SEC)
+            except asyncio.CancelledError:
+                raise
+            for user_id, client in list(self._clients.items()):
+                try:
+                    if not client.is_connected():
+                        logger.warning(f"Userbot for user {user_id} disconnected, reconnecting")
+                        await client.connect()
+                        if not await client.is_user_authorized():
+                            logger.warning(f"User {user_id} no longer authorized after reconnect")
+                            self._clients.pop(user_id, None)
+                except Exception:
+                    logger.exception(f"keep_alive: failed to reconnect user {user_id}")

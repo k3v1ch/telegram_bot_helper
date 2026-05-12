@@ -3,6 +3,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from telethon import TelegramClient
+from telethon.tl.custom.message import Message
 from telethon.tl.types import InputMessagesFilterPinned, MessageService
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,8 @@ async def fetch_messages(
     source_chat_id: int,
     source_topic_id: int,
     lookback_hours: int,
-) -> list[dict]:
+    previous_pinned: str | None = None,
+) -> tuple[list[dict], bool, str | None]:
     cutoff = datetime.now(MSK) - timedelta(hours=lookback_hours)
     entity = await client.get_entity(source_chat_id)
 
@@ -69,11 +71,22 @@ async def fetch_messages(
         f"Stage 1: chat={source_chat_id} topic={source_topic_id} "
         f"scanned={total_fetched} kept={len(raw)}"
     )
-    return raw
+
+    pinned_text = await fetch_pinned(client, source_chat_id)
+    pinned_changed = pinned_text is not None and pinned_text != previous_pinned
+
+    return raw, pinned_changed, pinned_text
 
 
 async def fetch_pinned(client: TelegramClient, source_chat_id: int) -> str | None:
     entity = await client.get_entity(source_chat_id)
     async for msg in client.iter_messages(entity, filter=InputMessagesFilterPinned, limit=1):
         return msg.text or None
+    return None
+
+
+async def fetch_pinned_message(client: TelegramClient, source_chat_id: int) -> Message | None:
+    entity = await client.get_entity(source_chat_id)
+    async for msg in client.iter_messages(entity, filter=InputMessagesFilterPinned, limit=1):
+        return msg
     return None

@@ -4,9 +4,9 @@ import logging
 from telegram import Update
 from telegram.ext import Application, ApplicationBuilder, ContextTypes
 
-from bot import scheduler as scheduler_mod
-from bot import userbot
+from bot import analyzer, scheduler as scheduler_mod, userbot
 from bot.config import Config
+from bot.db import crud
 from bot.db.database import get_session, init_db
 from bot.handlers import admin as admin_handlers
 from bot.handlers import auth as auth_handlers
@@ -14,7 +14,8 @@ from bot.handlers import chats as chats_handlers
 from bot.handlers import digest as digest_handlers
 from bot.handlers import search as search_handlers
 from bot.handlers import start as start_handlers
-from bot.scheduler import ScheduleManager
+from bot.scheduler import DigestScheduler, parse_chat_topic
+from bot.userbot.alerter import register_alert
 from bot.userbot.manager import UserbotManager
 
 logger = logging.getLogger("bot")
@@ -56,16 +57,35 @@ def _register_handlers(app: Application) -> None:
     for h in admin_handlers.build_handlers():
         app.add_handler(h)
 
-    # Reply-keyboard router registered last so ConversationHandler text
-    # states (auth/add/edit/search) receive messages first.
     app.add_handler(main_router)
-
     app.add_error_handler(_error_handler)
+
+
+async def _register_alerters(bot) -> None:
+    if userbot.manager is None:
+        return
+    async with get_session() as session:
+        chats = await crud.get_all_active_chats(session)
+    registered = 0
+    for chat in chats:
+        if not chat.alerts_enabled:
+            continue
+        try:
+            if not await userbot.manager.is_connected(chat.user_id):
+                continue
+            client = await userbot.manager.get_client(chat.user_id)
+            dest_chat_id, dest_topic_id = parse_chat_topic(chat.dest)
+            register_alert(client, chat, bot, dest_chat_id, dest_topic_id)
+            registered += 1
+        except Exception as e:
+            logger.warning(f"Could not register alerter for chat {chat.id}: {e}")
+    logger.info(f"Registered {registered} alerters")
 
 
 async def main() -> None:
     setup_logging()
     config = Config.from_env()
+    analyzer.init(config.groq_api_key)
 
     await init_db()
     logger.info("Database initialized")
@@ -77,10 +97,6 @@ async def main() -> None:
     )
     await userbot.manager.start_all()
 
-    scheduler_mod.manager = ScheduleManager()
-    scheduler_mod.manager.start()
-    logger.info("Scheduler started")
-
     application = (
         ApplicationBuilder()
         .token(config.bot_token)
@@ -89,7 +105,15 @@ async def main() -> None:
     application.bot_data["config"] = config
     application.bot_data["admin_user_id"] = config.admin_user_id
 
+    scheduler_mod.scheduler = DigestScheduler(
+        db_factory=get_session,
+        manager=userbot.manager,
+        bot=application.bot,
+    )
+    await scheduler_mod.scheduler.start()
+
     _register_handlers(application)
+    await _register_alerters(application.bot)
 
     logger.info("Starting Telegram bot polling")
     async with application:
@@ -98,16 +122,22 @@ async def main() -> None:
             drop_pending_updates=True,
             allowed_updates=Update.ALL_TYPES,
         )
+        keep_alive_task = asyncio.create_task(userbot.manager.keep_alive())
+        stop_event = asyncio.Event()
         try:
-            stop_event = asyncio.Event()
             await stop_event.wait()
         finally:
+            keep_alive_task.cancel()
+            try:
+                await keep_alive_task
+            except (asyncio.CancelledError, Exception):
+                pass
             await application.updater.stop()
             await application.stop()
             if userbot.manager is not None:
                 await userbot.manager.stop_all()
-            if scheduler_mod.manager is not None:
-                scheduler_mod.manager.shutdown()
+            if scheduler_mod.scheduler is not None:
+                scheduler_mod.scheduler.shutdown()
 
 
 if __name__ == "__main__":
