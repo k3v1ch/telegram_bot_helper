@@ -1,288 +1,242 @@
-import argparse
 import asyncio
 import logging
+import os
 import sys
-from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
-from telegram import Bot
-from telethon import TelegramClient
+from telegram import Update
+from telegram.ext import Application, ApplicationBuilder, ContextTypes
 
-from bot.alerter import Alerter
-from bot.analyzer import analyze_messages
+from bot import analyzer, scheduler as scheduler_mod, userbot
 from bot.config import Config
-from bot.digest_bot import build_bot_app
-from bot.health import make_health_app, run_health_server
-from bot.pinned import check_and_forward_pinned
-from bot.reader import fetch_messages
-from bot.sender import send_digest, send_empty_notice, send_error
-from bot.state import BotState
-from bot.stats import save_today_count
-
-MSK = timezone(timedelta(hours=3))
+from bot.db import crud
+from bot.db.database import get_session, init_db
+from bot.handlers import admin as admin_handlers
+from bot.handlers import auth as auth_handlers
+from bot.handlers import chats as chats_handlers
+from bot.handlers import digest as digest_handlers
+from bot.handlers import search as search_handlers
+from bot.handlers import start as start_handlers
+from bot.handlers import stats as stats_handlers
+from bot.scheduler import DigestScheduler, parse_chat_topic
+from bot.userbot.alerter import register_alert
+from bot.userbot.manager import UserbotManager
 
 logger = logging.getLogger("bot")
 
-userbot_client: TelegramClient | None = None
-_digest_lock = asyncio.Lock()
+USER_ERROR_TEXT = "❌ Произошла ошибка. Попробуйте позже."
 
 
 def setup_logging() -> None:
     log_dir = Path("/app/logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        log_dir = None
 
     formatter = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    file_handler = RotatingFileHandler(
-        log_dir / "digest.log",
-        maxBytes=5 * 1024 * 1024,
-        backupCount=3,
-        encoding="utf-8",
-    )
-    file_handler.setFormatter(formatter)
-
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    root_logger.addHandler(file_handler)
-    root_logger.addHandler(console_handler)
-
-
-def create_userbot(config: Config) -> TelegramClient:
-    session_dir = Path("/app/sessions")
-    session_dir.mkdir(parents=True, exist_ok=True)
-    return TelegramClient(
-        str(config.session_path),
-        config.telegram_api_id,
-        config.telegram_api_hash,
-    )
-
-
-async def run_digest(
-    userbot: TelegramClient, bot: Bot, config: Config, state: BotState,
-    lookback_hours: int | None = None, weekly: bool = False,
-) -> int:
-    if _digest_lock.locked():
-        logger.warning("Digest already in progress, waiting for the running one to finish")
-
-    async with _digest_lock:
-        return await _run_digest_locked(userbot, bot, config, state, lookback_hours, weekly)
-
-
-async def _run_digest_locked(
-    userbot: TelegramClient, bot: Bot, config: Config, state: BotState,
-    lookback_hours: int | None, weekly: bool,
-) -> int:
-    hours = lookback_hours if lookback_hours is not None else config.lookback_hours
-    label = "weekly" if weekly else "daily"
-    logger.info(f"Starting {label} digest generation (lookback={hours}h)")
-
-    try:
-        fetch_result = await fetch_messages(userbot, config, lookback_hours=lookback_hours)
-        messages = fetch_result.messages
-        count = len(messages)
-
-        save_today_count(config.data_dir, count)
-        state.record_run(count)
-
-        if not messages:
-            await send_empty_notice(bot, config)
-            return 0
-
-        source_entity = await userbot.get_entity(config.source_chat_id)
-        source_name = getattr(source_entity, "title", str(config.source_chat_id))
-
-        start_time = messages[0]["time"]
-        end_time = messages[-1]["time"]
-
-        pinned_preview = await check_and_forward_pinned(userbot, bot, config)
-
-        analysis = await analyze_messages(messages, config, weekly=weekly)
-
-        logger.info(
-            f"Pipeline: {fetch_result.total_fetched} fetched → "
-            f"{fetch_result.after_stage1} after S1 → "
-            f"{analysis.after_stage2} after S2"
-        )
-
-        if weekly:
-            period = "7d"
-        elif hours <= 1:
-            period = "1h"
-        elif hours <= 5:
-            period = "5h"
-        elif hours <= 12:
-            period = "12h"
-        elif hours <= 24:
-            period = "24h"
-        else:
-            period = f"{hours}h"
-
-        await send_digest(
-            bot, config, analysis.text, count, source_name, start_time, end_time,
-            total_fetched=fetch_result.total_fetched,
-            after_stage1=fetch_result.after_stage1,
-            after_stage2=analysis.after_stage2,
-            pinned_preview=pinned_preview,
-            weekly=weekly,
-            period=period,
-        )
-
-        return count
-
-    except Exception as e:
-        logger.exception("Digest generation failed")
+    handlers: list[logging.Handler] = []
+    if log_dir is not None:
         try:
-            await send_error(bot, config, str(e))
-        except Exception:
-            logger.exception("Failed to send error notification")
-        raise
-
-
-async def run_bot(app, stop_event: asyncio.Event) -> None:
-    try:
-        await app.initialize()
-        await app.updater.start_polling(drop_pending_updates=True)
-        await app.start()
-        logger.info("Telegram bot started, /start and /menu available")
-        await stop_event.wait()
-    except Exception:
-        logger.exception("Bot polling failed")
-    finally:
-        try:
-            await app.updater.stop()
-            await app.stop()
-            await app.shutdown()
+            file_handler = RotatingFileHandler(
+                log_dir / "digest.log",
+                maxBytes=5 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            )
+            file_handler.setFormatter(formatter)
+            handlers.append(file_handler)
         except Exception:
             pass
 
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    handlers.append(console_handler)
 
-async def run_userbot(userbot: TelegramClient, stop_event: asyncio.Event) -> None:
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    for h in root_logger.handlers[:]:
+        root_logger.removeHandler(h)
+    for h in handlers:
+        root_logger.addHandler(h)
+
+
+async def _notify_user(update: object) -> None:
+    if not isinstance(update, Update):
+        return
     try:
-        await stop_event.wait()
+        if update.callback_query is not None:
+            await update.callback_query.answer(USER_ERROR_TEXT, show_alert=True)
+            return
+        if update.effective_message is not None:
+            await update.effective_message.reply_text(USER_ERROR_TEXT)
     except Exception:
-        pass
-    finally:
-        await userbot.disconnect()
+        logger.exception("Failed to notify user about error")
+
+
+async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Handler error", exc_info=context.error)
+
+    await _notify_user(update)
+
+    admin_id = int(context.bot_data.get("admin_user_id", 0))
+    if not admin_id:
+        return
+    try:
+        msg = f"⚠️ Ошибка в обработчике:\n{context.error!r}"
+        await context.bot.send_message(chat_id=admin_id, text=msg[:3500])
+    except Exception:
+        logger.exception("Failed to notify admin of error")
+
+
+def _register_handlers(app: Application) -> None:
+    start_cmd, menu_cmd, back_cb, main_router = start_handlers.build_handlers()
+    app.add_handler(start_cmd)
+    app.add_handler(menu_cmd)
+    app.add_handler(back_cb)
+
+    for h in auth_handlers.build_handlers():
+        app.add_handler(h)
+    for h in chats_handlers.build_handlers():
+        app.add_handler(h)
+    for h in digest_handlers.build_handlers():
+        app.add_handler(h)
+    for h in search_handlers.build_handlers():
+        app.add_handler(h)
+    for h in admin_handlers.build_handlers():
+        app.add_handler(h)
+    for h in stats_handlers.build_handlers():
+        app.add_handler(h)
+
+    app.add_handler(main_router)
+    app.add_error_handler(_error_handler)
+
+
+async def _register_alerters(bot) -> None:
+    if userbot.manager is None:
+        return
+    async with get_session() as session:
+        chats = await crud.get_all_active_chats(session)
+    registered = 0
+    for chat in chats:
+        if not chat.alerts_enabled:
+            continue
+        try:
+            if not await userbot.manager.is_connected(chat.user_id):
+                continue
+            client = await userbot.manager.get_client(chat.user_id)
+            dest_chat_id, dest_topic_id = parse_chat_topic(chat.dest)
+            register_alert(client, chat, bot, dest_chat_id, dest_topic_id)
+            registered += 1
+        except Exception as e:
+            logger.warning(f"Could not register alerter for chat {chat.id}: {e}")
+    logger.info(f"Registered {registered} alerters")
+
+
+async def _migrate_legacy_env(admin_user_id: int) -> None:
+    """One-shot migration from the legacy single-user env-driven config."""
+    old_phone = os.getenv("TELEGRAM_PHONE")
+    old_source = os.getenv("SOURCE")
+    old_dest = os.getenv("DEST")
+    old_lookback = os.getenv("LOOKBACK_HOURS")
+    old_time = os.getenv("DIGEST_TIME")
+
+    if not any([old_phone, old_source, old_dest, old_lookback, old_time]):
+        return
+    if not (old_source and old_dest):
+        return
+
+    async with get_session() as session:
+        existing = await crud.get_user_chats(session, admin_user_id)
+        if existing:
+            return
+        user = await crud.get_user(session, admin_user_id)
+        if user is None:
+            await crud.create_user(session, admin_user_id, None, "admin")
+        try:
+            lookback = int(old_lookback) if old_lookback else 24
+        except ValueError:
+            lookback = 24
+        await crud.create_chat(
+            session,
+            user_id=admin_user_id,
+            name="Migrated chat",
+            source=old_source,
+            dest=old_dest,
+            schedule_time=old_time or "09:00",
+            lookback_hours=lookback,
+        )
+
+    logger.info("Migrated existing config to DB")
 
 
 async def main() -> None:
     setup_logging()
-
-    parser = argparse.ArgumentParser(description="Telegram Digest Bot")
-    parser.add_argument("--now", action="store_true", help="Run digest immediately")
-    args = parser.parse_args()
-
     config = Config.from_env()
-    state = BotState(config.data_dir, config.alerts_enabled_default)
+    analyzer.init(config.groq_api_key)
 
-    global userbot_client
-    userbot = create_userbot(config)
-    userbot_client = userbot
+    await init_db()
+    logger.info("Database initialized")
 
-    await userbot.start(phone=config.telegram_phone)
-    logger.info("Telethon userbot connected")
+    await _migrate_legacy_env(config.admin_user_id)
 
-    bot = Bot(token=config.bot_token)
-
-    if args.now:
-        await run_digest(userbot, bot, config, state)
-        await userbot.disconnect()
-        return
-
-    scheduler = AsyncIOScheduler()
-
-    async def scheduled_digest():
-        try:
-            await run_digest(userbot, bot, config, state)
-        except Exception:
-            pass
-        _update_next_run(scheduler, state)
-
-    async def scheduled_weekly():
-        try:
-            await run_digest(userbot, bot, config, state, lookback_hours=168, weekly=True)
-        except Exception:
-            pass
-
-    scheduler.add_job(
-        scheduled_digest,
-        CronTrigger(hour=config.digest_hour, minute=config.digest_minute, timezone=MSK),
-        id="digest_job",
-        misfire_grace_time=600,
-        coalesce=True,
+    userbot.manager = UserbotManager(
+        api_id=config.telegram_api_id,
+        api_hash=config.telegram_api_hash,
+        db_session_factory=get_session,
     )
+    await userbot.manager.start_all()
 
-    scheduler.add_job(
-        scheduled_weekly,
-        CronTrigger(day_of_week=config.weekly_digest_day, hour=5, minute=0, timezone=MSK),
-        id="weekly_job",
-        misfire_grace_time=1800,
-        coalesce=True,
+    application = (
+        ApplicationBuilder()
+        .token(config.bot_token)
+        .build()
     )
+    application.bot_data["config"] = config
+    application.bot_data["admin_user_id"] = config.admin_user_id
 
-    async def check_pinned():
-        try:
-            await check_and_forward_pinned(userbot, bot, config)
-        except Exception:
-            logger.exception("Periodic pinned check failed")
-
-    scheduler.add_job(
-        check_pinned,
-        IntervalTrigger(minutes=30),
-        id="pinned_check",
-        misfire_grace_time=300,
-        coalesce=True,
+    scheduler_mod.scheduler = DigestScheduler(
+        db_factory=get_session,
+        manager=userbot.manager,
+        bot=application.bot,
     )
+    await scheduler_mod.scheduler.start()
 
-    scheduler.start()
-    _update_next_run(scheduler, state)
-    logger.info(f"Scheduler started, digest at {config.digest_time} MSK daily, weekly on {config.weekly_digest_day}")
+    _register_handlers(application)
+    await _register_alerters(application.bot)
 
-    await check_pinned()
-    logger.info("Initial pinned message check complete")
-
-    async def digest_callback(lookback_hours: int | None = None, weekly: bool = False) -> int:
-        count = await run_digest(userbot, bot, config, state, lookback_hours=lookback_hours, weekly=weekly)
-        _update_next_run(scheduler, state)
-        return count
-
-    alerter = Alerter(userbot, bot, config, state)
-    alerter.register()
-
-    app = build_bot_app(config, state, digest_callback)
-    stop_event = asyncio.Event()
-
-    health_app = make_health_app(lambda: userbot_client, state)
-
-    try:
-        await asyncio.gather(
-            run_bot(app, stop_event),
-            run_userbot(userbot, stop_event),
-            run_health_server(health_app, config.health_port, stop_event),
+    logger.info("Starting Telegram bot polling")
+    async with application:
+        await application.start()
+        await application.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
         )
-    except (KeyboardInterrupt, SystemExit):
-        pass
-    finally:
-        stop_event.set()
-        scheduler.shutdown()
-        logger.info("Shutdown complete")
-
-
-def _update_next_run(scheduler: AsyncIOScheduler, state: BotState) -> None:
-    job = scheduler.get_job("digest_job")
-    if job and job.next_run_time:
-        state.set_next_run(job.next_run_time)
+        keep_alive_task = asyncio.create_task(userbot.manager.keep_alive())
+        stop_event = asyncio.Event()
+        try:
+            await stop_event.wait()
+        finally:
+            keep_alive_task.cancel()
+            try:
+                await keep_alive_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            await application.updater.stop()
+            await application.stop()
+            if userbot.manager is not None:
+                await userbot.manager.stop_all()
+            if scheduler_mod.scheduler is not None:
+                scheduler_mod.scheduler.shutdown()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass

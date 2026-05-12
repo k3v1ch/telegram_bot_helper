@@ -1,11 +1,30 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: digest_bot
+      POSTGRES_USER: digest
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U digest"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   digest:
     build: .
     restart: unless-stopped
     env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
-      - ./sessions:/app/sessions
       - ./logs:/app/logs
-      - ./data:/app/data
     stdin_open: true
     tty: true
+
+volumes:
+  postgres_data:

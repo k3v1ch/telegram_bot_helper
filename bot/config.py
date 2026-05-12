@@ -1,26 +1,15 @@
 import os
 from dataclasses import dataclass
-from pathlib import Path
 
 
 @dataclass
 class Config:
-    telegram_api_id: int
-    telegram_api_hash: str
-    telegram_phone: str
-    source_chat_id: int
-    source_topic_id: int
-    dest_chat_id: int
-    dest_topic_id: int
-    groq_api_key: str
     bot_token: str
     admin_user_id: int
-    digest_time: str
-    lookback_hours: int
-    session_name: str
-    alerts_enabled_default: bool
-    weekly_digest_day: str
-    health_port: int
+    groq_api_key: str
+    database_url: str
+    telegram_api_id: int
+    telegram_api_hash: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -30,46 +19,11 @@ class Config:
                 raise ValueError(f"Missing required env var: {key}")
             return val
 
-        def parse_chat_topic(val: str, var_name: str) -> tuple[int, int]:
-            if ":" not in val:
-                raise ValueError(f"{var_name} must be in format chat_id:topic_id (e.g. -1003332852289:155)")
-            chat_str, topic_str = val.split(":", 1)
-            return int(chat_str), int(topic_str)
-
-        source_chat_id, source_topic_id = parse_chat_topic(require("SOURCE"), "SOURCE")
-        dest_chat_id, dest_topic_id = parse_chat_topic(require("DEST"), "DEST")
-
         return cls(
-            telegram_api_id=int(require("TELEGRAM_API_ID")),
-            telegram_api_hash=require("TELEGRAM_API_HASH"),
-            telegram_phone=require("TELEGRAM_PHONE"),
-            source_chat_id=source_chat_id,
-            source_topic_id=source_topic_id,
-            dest_chat_id=dest_chat_id,
-            dest_topic_id=dest_topic_id,
-            groq_api_key=require("GROQ_API_KEY"),
             bot_token=require("BOT_TOKEN"),
             admin_user_id=int(require("ADMIN_USER_ID")),
-            digest_time=os.getenv("DIGEST_TIME", "09:00"),
-            lookback_hours=int(os.getenv("LOOKBACK_HOURS", "24")),
-            session_name=os.getenv("SESSION_NAME", "userbot"),
-            alerts_enabled_default=os.getenv("ALERTS_ENABLED", "true").lower() == "true",
-            weekly_digest_day=os.getenv("WEEKLY_DIGEST_DAY", "mon").lower()[:3],
-            health_port=int(os.getenv("HEALTH_PORT", "8080")),
+            groq_api_key=require("GROQ_API_KEY"),
+            database_url=require("DATABASE_URL"),
+            telegram_api_id=int(require("TELEGRAM_API_ID")),
+            telegram_api_hash=require("TELEGRAM_API_HASH"),
         )
-
-    @property
-    def data_dir(self) -> Path:
-        return Path("/app/data")
-
-    @property
-    def session_path(self) -> Path:
-        return Path("/app/sessions") / self.session_name
-
-    @property
-    def digest_hour(self) -> int:
-        return int(self.digest_time.split(":")[0])
-
-    @property
-    def digest_minute(self) -> int:
-        return int(self.digest_time.split(":")[1])

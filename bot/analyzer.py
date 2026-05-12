@@ -1,12 +1,16 @@
 import asyncio
 import logging
-from dataclasses import dataclass
 
 from groq import AsyncGroq
 
-from bot.config import Config
-
 logger = logging.getLogger(__name__)
+
+_groq_api_key: str | None = None
+
+
+def init(api_key: str) -> None:
+    global _groq_api_key
+    _groq_api_key = api_key
 
 FILTER_PROMPT = """\
 Ты фильтруешь сырой лог чата VPN-операторов.
@@ -108,12 +112,6 @@ API_TIMEOUT = 60.0
 BLOCK_BOUNDARIES = [(h, h + BLOCK_HOURS) for h in range(0, 24, BLOCK_HOURS)]
 
 
-@dataclass
-class AnalysisResult:
-    text: str
-    after_stage2: int
-
-
 def _split_into_blocks(messages: list[dict]) -> dict[str, list[dict]]:
     blocks: dict[str, list[dict]] = {}
     for msg in messages:
@@ -176,16 +174,23 @@ def _count_lines(text: str) -> int:
     return len([line for line in text.strip().split("\n") if line.strip()])
 
 
-async def analyze_messages(messages: list[dict], config: Config, weekly: bool = False) -> AnalysisResult:
+async def analyze(
+    messages: list[dict],
+    custom_prompt: str | None = None,
+    weekly: bool = False,
+) -> tuple[str, int]:
+    if _groq_api_key is None:
+        raise RuntimeError("analyzer.init(api_key) must be called before analyze()")
+
     blocks = {label: msgs for label, msgs in _split_into_blocks(messages).items() if msgs}
 
     if not blocks:
-        return AnalysisResult(text="💤 За период ничего важного не произошло", after_stage2=0)
+        return ("💤 За период ничего важного не произошло", 0)
 
     blocks = _merge_to_max_blocks(blocks, MAX_BLOCKS)
     logger.info(f"Stage 2: {len(blocks)} blocks after merging")
 
-    client = AsyncGroq(api_key=config.groq_api_key)
+    client = AsyncGroq(api_key=_groq_api_key)
 
     # --- Stage 2: AI rough filter ---
     filtered_lines: list[str] = []
@@ -215,7 +220,8 @@ async def analyze_messages(messages: list[dict], config: Config, weekly: bool = 
                 result = response.choices[0].message.content.strip()
                 call_count += 1
             except Exception as e:
-                if "429" in str(e) or "rate" in str(e).lower():
+                err = str(e).lower()
+                if "429" in err or "503" in err or "rate" in err or "unavailable" in err:
                     logger.warning(f"Stage 2: rate limited on block {label}, waiting {RETRY_DELAY}s")
                     await asyncio.sleep(RETRY_DELAY)
                     try:
@@ -250,7 +256,7 @@ async def analyze_messages(messages: list[dict], config: Config, weekly: bool = 
     logger.info(f"Stage 2 complete: {after_stage2} lines kept from {len(messages)} original messages")
 
     if not filtered_lines:
-        return AnalysisResult(text="💤 За период ничего важного не произошло", after_stage2=0)
+        return ("💤 За период ничего важного не произошло", 0)
 
     # --- Stage 2.5: Compress filtered content for weekly digests ---
     combined = "\n\n".join(filtered_lines)
@@ -286,8 +292,13 @@ async def analyze_messages(messages: list[dict], config: Config, weekly: bool = 
         logger.info(f"Stage 2.5 complete: {len(combined)} chars after compression")
 
     # --- Stage 3: Final analysis ---
-    stage3_prompt = WEEKLY_PROMPT if weekly else FINAL_PROMPT
-    logger.info(f"Stage 3: {len(combined)} chars of filtered content (weekly={weekly})")
+    if custom_prompt:
+        stage3_prompt = custom_prompt
+    elif weekly:
+        stage3_prompt = WEEKLY_PROMPT
+    else:
+        stage3_prompt = FINAL_PROMPT
+    logger.info(f"Stage 3: {len(combined)} chars of filtered content (weekly={weekly}, custom={custom_prompt is not None})")
 
     await asyncio.sleep(STAGE3_DELAY)
 
@@ -310,8 +321,9 @@ async def analyze_messages(messages: list[dict], config: Config, weekly: bool = 
         digest = response.choices[0].message.content
         logger.info("Stage 3 complete")
     except Exception as e:
-        if "429" in str(e) or "rate" in str(e).lower():
-            logger.warning(f"Stage 3: rate limited, waiting {RETRY_DELAY}s")
+        err = str(e).lower()
+        if "429" in err or "503" in err or "rate" in err or "unavailable" in err:
+            logger.warning(f"Stage 3: rate limited or unavailable, waiting {RETRY_DELAY}s")
             await asyncio.sleep(RETRY_DELAY)
             try:
                 response = await _stage3_call()
@@ -319,9 +331,9 @@ async def analyze_messages(messages: list[dict], config: Config, weekly: bool = 
                 logger.info("Stage 3 complete after retry")
             except Exception:
                 logger.exception("Stage 3 retry failed")
-                return AnalysisResult(text="⚠️ Ошибка при финальном анализе", after_stage2=after_stage2)
+                return ("⚠️ Ошибка при финальном анализе", after_stage2)
         else:
             logger.exception("Stage 3 failed")
-            return AnalysisResult(text="⚠️ Ошибка при финальном анализе", after_stage2=after_stage2)
+            return ("⚠️ Ошибка при финальном анализе", after_stage2)
 
-    return AnalysisResult(text=digest, after_stage2=after_stage2)
+    return (digest, after_stage2)
