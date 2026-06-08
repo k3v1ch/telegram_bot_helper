@@ -16,7 +16,7 @@ Multi-user, multi-account Telegram digest bot. Каждый пользовате
 
 - **Telethon userbot** (`bot/userbot/manager.py::UserbotManager`) — N клиентов на пользователя, ключ — `session_id` (SERIAL PK таблицы `user_sessions`). Читает source-чаты, форвардит закрепы.
 - **python-telegram-bot** — inline-only UI: одно сообщение редактируется при навигации, все экраны через `InlineKeyboardMarkup`. Reply-клавиатур нет.
-- **Groq API** (`bot/analyzer.py`) — три стадии (фильтр → сжатие → дайджест). Универсальный default prompt; опциональный per-chat `custom_prompt` переопределяет Stage 3.
+- **LLM (`bot/analyzer.py`)** — один проход через OpenAI-compatible API. Поддерживается ДВА провайдера (выбор через `.env` — ровно один ключ из {`GROQ_API_KEY`, `MIMO_API_KEY`}). Универсальный default prompt максимально подробный + секция `📖 Подробнее` с разбором технических тем (что это, зачем, как использовать); опциональный per-chat `custom_prompt` полностью переопределяет system prompt.
 - **APScheduler** (`bot/scheduler.py::DigestScheduler`) — daily + Monday weekly cron на каждый активный чат, plus on-demand `run_digest`.
 - **PostgreSQL 16** через SQLAlchemy 2.0 async + asyncpg.
 - Один asyncio event loop на всё.
@@ -72,10 +72,17 @@ Legacy single-user modules (`digest_bot.py`, `digest_store.py`, `state.py`, `sta
 |---|---|
 | `BOT_TOKEN` | python-telegram-bot токен |
 | `ADMIN_USER_ID` | Telegram numeric ID админа |
-| `GROQ_API_KEY` | Groq API key |
+| `MIMO_API_KEY` | Xiaomi MiMo API key (приоритетный; OpenAI-compatible). Опционально `MIMO_BASE_URL`, `MIMO_MODEL`. |
+| `GROQ_API_KEY` | Legacy Groq API key. Опционально `GROQ_BASE_URL`, `GROQ_MODEL`. |
 | `POSTGRES_PASSWORD` | DB password |
 | `DATABASE_URL` | `postgresql+asyncpg://digest:…@postgres:5432/digest_bot` |
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Общие Telethon креды |
+
+**LLM provider — ровно один ключ.** Если в `.env` заданы и `MIMO_API_KEY` и `GROQ_API_KEY` — `Config.from_env()` бросает `ValueError("Both GROQ_API_KEY and MIMO_API_KEY are set…")`. Если оба пусты/закомментированы — тоже `ValueError("No LLM provider configured…")`. Если задан `MIMO_API_KEY` — он имеет приоритет (на случай, если оба не закомментированы, но один пустой).
+
+Defaults:
+- Mimo: `https://token-plan-sgp.xiaomimimo.com/v1`, model `mimo-v2.5-pro`.
+- Groq: `https://api.groq.com/openai/v1`, model `meta-llama/llama-4-scout-17b-16e-instruct`.
 
 Всё user-specific / chat-specific — в БД.
 
@@ -174,22 +181,32 @@ PostgreSQL 16. Timestamps — UTC naive, в UI — МСК.
 
 `UserbotManager.keep_alive()` каждые 5 минут перебирает `_clients` (ключ `session_id`). Disconnected → `stop_client + start_client` (свежий `session_string` из БД).
 
-## Default prompts
+## Analyzer pipeline (single-pass)
 
-`bot/analyzer.py`:
-- `FILTER_PROMPT` — Stage 2, generic фильтр полезных сообщений.
-- `FINAL_PROMPT` — Stage 3, generic дайджест с резюме + 🔴 Важное / 🟡 Обновления / 🔵 Полезно.
-- `WEEKLY_PROMPT` — Stage 3 для 168h, лимит 10 пунктов.
-- `COMPRESS_PROMPT` — Stage 2.5 для weekly с >8000 chars.
+`bot/analyzer.py` использует **openai SDK** (`AsyncOpenAI`) с настраиваемым `base_url` — это позволяет одним кодом ходить и в Groq, и в Mimo (оба OpenAI-compatible).
 
-`chat.custom_prompt` если задан — заменяет Stage 3 prompt.
+Старый трёхстадийный конвейер (фильтр → сжатие → финал) **удалён**. Сейчас:
+
+1. Все сообщения склеиваются в `[ЧЧ:ММ] Ник: текст\n…` и идут одним вызовом в LLM.
+2. Если входной лог > `INPUT_CHUNK_CHARS` (200k символов) — режется на куски, каждый дайджестится, потом отдельным вызовом склеивается финальный.
+3. На 429/503/rate/unavailable/timeout — один повтор через `RETRY_DELAY` (10с).
+
+`analyze(messages, custom_prompt, weekly) -> (text, count)`:
+- `text` — готовый дайджест в Markdown.
+- `count` — `len(messages)` (фильтрация на стадиях больше не уменьшает счётчик).
+
+Default prompts:
+- `DETAILED_PROMPT` — daily/on-demand. Структура: `📌 Резюме / 🔴 Важное / 🟡 Обновления / 🔵 Полезно / 📖 Подробнее`. Секция `📖 Подробнее` раскрывает 2-5 технических тем как мини-инструкцию: «Что это / Зачем нужно / Как использовать (команды, мини-пример в ``` ``` ```, ссылки) / На что обратить внимание».
+- `WEEKLY_PROMPT` — то же, но «недельная» оптика: больше группировки, 3-7 тем в `📖 Подробнее`.
+
+`chat.custom_prompt` если задан — полностью заменяет system prompt (включая всю структуру).
 
 ## Error handling
 
 - `Application.add_error_handler` (в `main.py`) — лог + user-popup + DM админу.
 - DB через `get_session()` с auto-commit/rollback.
 - Telethon `FloodWaitError` — retry в `scheduler.run_digest`.
-- Groq 429/503/rate/unavailable — retry в analyzer на Stage 2 и Stage 3.
+- LLM 429/503/rate/unavailable/timeout — один retry внутри `analyzer._call_llm` через `RETRY_DELAY`.
 - Telethon disconnect — `_resolve_client` пытается `start_client(session_id)` один раз.
 
 ## Legacy-env migration

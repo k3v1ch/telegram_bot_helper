@@ -12,6 +12,8 @@ def tmp_data_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def base_env(monkeypatch):
+    """Default env: Groq provider configured, Mimo unset."""
+    monkeypatch.delenv("MIMO_API_KEY", raising=False)
     env = {
         "TELEGRAM_API_ID": "12345",
         "TELEGRAM_API_HASH": "hashvalue",

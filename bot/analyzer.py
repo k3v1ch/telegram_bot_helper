@@ -1,132 +1,123 @@
 import asyncio
 import logging
 
-from groq import AsyncGroq
+from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
-_groq_api_key: str | None = None
+_api_key: str | None = None
+_base_url: str | None = None
+_model: str | None = None
+_provider: str | None = None
+_label: str | None = None
 
 
-def init(api_key: str) -> None:
-    global _groq_api_key
-    _groq_api_key = api_key
+def init(provider: str, api_key: str, base_url: str, model: str, label: str | None = None) -> None:
+    global _api_key, _base_url, _model, _provider, _label
+    _provider = provider
+    _api_key = api_key
+    _base_url = base_url
+    _model = model
+    _label = label or provider
 
-FILTER_PROMPT = """\
-Ты фильтруешь сырой лог Telegram-чата.
 
-Твоя задача: оставить ТОЛЬКО те строки которые содержат полезную информацию:
-- Важные факты, события, решения
-- Технические выводы и рекомендации
-- Объявления и анонсы
-- Конкретные данные (числа, ссылки, имена)
+DETAILED_PROMPT = """\
+Ты — внимательный аналитик переписки в Telegram. На вход дают полный сырой лог сообщений за период
+в формате `[ЧЧ:ММ] Ник: текст`. Твоя задача — собрать МАКСИМАЛЬНО ПОДРОБНЫЙ структурированный
+дайджест на русском языке. У тебя нет жёсткого лимита по длине — пиши столько, сколько нужно,
+чтобы ничего важного не упустить.
 
-Удали: флуд, приветствия, вопросы без ответов, оффтоп, \
-споры без вывода, шутки, эмоциональные реплики без смысла.
+ПРАВИЛА КАЧЕСТВА:
+- Игнорируй флуд, приветствия, оффтоп, шутки без сути, эмоциональные реплики без смысла.
+- Пиши безлично (без никнеймов), но факты, числа, ссылки, версии, имена файлов, пути, IP, ID
+  передавай ДОСЛОВНО.
+- Каждый пункт сопровождай меткой времени `[ЧЧ:ММ]` — той, когда событие реально обсуждалось.
+- Группируй связанные сообщения в одну тему (диапазон `[ЧЧ:ММ–ЧЧ:ММ]`).
+- Не выдумывай факты, которых нет в логе.
+- Если тема обсуждалась поверхностно — отрази 1-2 предложения; если детально — раскрой подробно.
 
-Верни ТОЛЬКО отфильтрованные строки в оригинальном формате [ЧЧ:ММ] Ник: текст.
-Ничего не добавляй от себя. Если в блоке нет ничего полезного — ответь: ПУСТО"""
+ФОРМАТ ОТВЕТА (используй Markdown):
 
-FINAL_PROMPT = """\
-Проанализируй переписку из Telegram-чата за указанный период и составь краткую сводку.
-
-ПРАВИЛА:
-- Выдели только важные и полезные события, факты, решения
-- Показывай время [ЧЧ:ММ] перед каждым пунктом
-- Пиши безлично, без упоминания никнеймов
-- Каждый пункт — законченная мысль в 1-2 предложения
-- Игнорируй флуд, приветствия, оффтоп
-
-ФОРМАТ:
-📌 Резюме: [одно предложение — главное за период]
+📌 *Резюме*
+[1-3 предложения, главное за период]
 
 ## 🔴 Важное
-(критические события, срочные новости)
+[критические события, инциденты, поломки, дедлайны, срочные новости.
+Каждый пункт — развёрнуто, 2-4 предложения: что произошло, последствия, статус.]
 
 ## 🟡 Обновления
-(изменения, новости, факты)
+[новости, релизы, изменения, фичи, объявления, факты.
+Каждый пункт — развёрнуто, с конкретикой: версии, даты, что именно изменилось.]
 
 ## 🔵 Полезно
-(советы, решения, выводы)
+[советы, лайфхаки, решения, выводы, рекомендации.
+Раскрывай суть совета, не «посоветовали что-то» — а ЧТО именно и зачем.]
 
-Секцию пропускай если нечего писать."""
+## 📖 Подробнее
+[Этот блок включай ТОЛЬКО если в логе действительно упомянуто что-то технически содержательное:
+инструмент, библиотека, фреймворк, команда, протокол, сервис, баг, фича, конфиг, метод, паттерн.
+Выбери 2-5 самых интересных тем и раскрой КАЖДУЮ как мини-инструкцию:
+
+### {Название темы}
+- **Что это:** 1-2 предложения простым языком.
+- **Зачем нужно:** в каких задачах применяется, какие проблемы решает.
+- **Как использовать:** конкретные шаги, команды, флаги, минимальный пример конфига/кода
+  в блоке кода (```), ссылки на официальную доку если упоминались.
+- **На что обратить внимание:** подводные камни, аналоги, ограничения — но ТОЛЬКО если в логе
+  об этом действительно говорили или ты уверенно знаешь.
+
+Если в логе технически интересного нет — пропусти весь блок целиком вместе с заголовком.]
+
+Любую секцию, в которой нечего писать, пропускай полностью."""
+
 
 WEEKLY_PROMPT = """\
-Это ЕЖЕНЕДЕЛЬНЫЙ дайджест за 7 дней Telegram-чата.
+Ты — внимательный аналитик переписки в Telegram. На вход дают сырой лог сообщений за НЕДЕЛЮ
+в формате `[ЧЧ:ММ] Ник: текст` (по дням подряд). Сделай ПОДРОБНЫЙ еженедельный дайджест на русском.
 
-Выдели только самые значимые события недели — максимум 10 пунктов.
-Группируй похожие события вместе.
-Показывай время/дату при необходимости.
-Пиши безлично, без упоминания никнеймов.
-Не выдумывай факты которых нет в тексте.
+ПРАВИЛА:
+- Раскрывай темы развёрнуто, без жёсткого лимита по длине.
+- Группируй связанные сообщения в одну тему — давай каждой теме временной диапазон, а не
+  отдельные метки на каждый чих.
+- Пиши безлично; факты, числа, ссылки, версии, имена файлов — передавай дословно.
+- Не выдумывай.
+- Игнорируй флуд, приветствия, оффтоп.
 
-ФОРМАТ:
-📌 Резюме: [одно предложение, самое главное за неделю]
+ФОРМАТ ОТВЕТА (Markdown):
+
+📌 *Резюме недели*
+[2-4 предложения, главное за неделю]
 
 ## 🔴 Важное
-(критические события недели)
+[ключевые события недели — детально: что произошло, к чему привело, статус.]
 
 ## 🟡 Обновления
-(новости и изменения)
+[новости, релизы, изменения, тренды — развёрнуто, с конкретикой.]
 
 ## 🔵 Полезно
-(советы, решения, выводы)
+[советы, решения, выводы, проверенные рецепты — раскрывай суть.]
 
-Секцию пропускай если нечего писать. Только самое важное."""
+## 📖 Подробнее
+[3-7 самых интересных тем недели. Для КАЖДОЙ:
 
-COMPRESS_PROMPT = """\
-Сожми следующие уже отфильтрованные факты до самых важных.
-Оставь максимум 10 строк. Только конкретные факты с временем.
-Формат: [ЧЧ:ММ] факт"""
+### {Название темы}
+- **Что это:** 1-2 предложения.
+- **Зачем нужно:** применение, какие проблемы решает.
+- **Как использовать:** команды, флаги, минимальный пример (```), ссылки на доки.
+- **Контекст обсуждения:** что именно говорили в чате — выводы, разногласия, проверенные рецепты.
 
-MAX_BLOCK_CHARS = 6000
-MAX_BLOCKS = 6
-BLOCK_HOURS = 2
-BLOCK_DELAY = 2
-RETRY_DELAY = 30
-STAGE3_DELAY = 10
-STAGE25_CHUNK = 4000
-STAGE25_THRESHOLD = 8000
-API_TIMEOUT = 60.0
+Если технически интересного нет — пропусти весь блок целиком.]
 
-BLOCK_BOUNDARIES = [(h, h + BLOCK_HOURS) for h in range(0, 24, BLOCK_HOURS)]
+Если в каком-то блоке писать нечего — пропускай его."""
 
 
-def _split_into_blocks(messages: list[dict]) -> dict[str, list[dict]]:
-    blocks: dict[str, list[dict]] = {}
-    for msg in messages:
-        hour = int(msg["time"].split(":")[0])
-        for start, end in BLOCK_BOUNDARIES:
-            if start <= hour < end:
-                label = f"{start:02d}:00–{end:02d}:00"
-                blocks.setdefault(label, []).append(msg)
-                break
-    return blocks
-
-
-def _merge_to_max_blocks(blocks: dict[str, list[dict]], max_blocks: int) -> dict[str, list[dict]]:
-    if len(blocks) <= max_blocks:
-        return blocks
-
-    labels = sorted(blocks.keys())
-    merged: list[tuple[str, list[dict]]] = [(l, blocks[l]) for l in labels]
-
-    while len(merged) > max_blocks:
-        min_size = float("inf")
-        min_idx = 0
-        for i in range(len(merged) - 1):
-            combined = len(merged[i][1]) + len(merged[i + 1][1])
-            if combined < min_size:
-                min_size = combined
-                min_idx = i
-
-        l1, m1 = merged[min_idx]
-        l2, m2 = merged[min_idx + 1]
-        new_label = f"{l1.split('–')[0]}–{l2.split('–')[1]}"
-        merged[min_idx] = (new_label, m1 + m2)
-        del merged[min_idx + 1]
-
-    return dict(merged)
+API_TIMEOUT = 180.0
+RETRY_DELAY = 10
+MAX_RETRIES = 2
+MAX_OUTPUT_TOKENS = 8192
+# Conservative chunk size: even with mimo's huge token budget, the server tends to
+# stall on >100k-char prompts. 60k chars ≈ 15k input tokens — comfortable for one call.
+INPUT_CHUNK_CHARS = 60_000
 
 
 def _format_messages(messages: list[dict]) -> str:
@@ -137,7 +128,7 @@ def _split_text_into_chunks(text: str, max_chars: int) -> list[str]:
     if len(text) <= max_chars:
         return [text]
 
-    chunks = []
+    chunks: list[str] = []
     while text:
         if len(text) <= max_chars:
             chunks.append(text)
@@ -154,166 +145,125 @@ def _count_lines(text: str) -> int:
     return len([line for line in text.strip().split("\n") if line.strip()])
 
 
+async def _call_llm(
+    client: AsyncOpenAI,
+    system_prompt: str,
+    user_content: str,
+) -> str | None:
+    assert _model is not None
+    user_msg = (
+        "Ниже сырой лог Telegram-чата за период. Составь дайджест по правилам выше "
+        "и ничего важного не упусти.\n\n"
+        f"{user_content}"
+    )
+    payload = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_msg},
+    ]
+
+    last_exc: Exception | None = None
+    for attempt in range(1, MAX_RETRIES + 2):  # initial + MAX_RETRIES retries
+        try:
+            response = await client.chat.completions.create(
+                model=_model,
+                temperature=0.3,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                messages=payload,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            last_exc = e
+            if attempt > MAX_RETRIES:
+                break
+            logger.warning(
+                "analyzer: call failed (attempt %d/%d), sleeping %ds: %r",
+                attempt,
+                MAX_RETRIES + 1,
+                RETRY_DELAY,
+                e,
+            )
+            await asyncio.sleep(RETRY_DELAY)
+    logger.error(
+        "analyzer: LLM call failed after %d attempts (provider=%s model=%s): %r",
+        MAX_RETRIES + 1,
+        _provider,
+        _model,
+        last_exc,
+    )
+    return None
+
+
 async def analyze(
     messages: list[dict],
     custom_prompt: str | None = None,
     weekly: bool = False,
 ) -> tuple[str, int]:
-    if _groq_api_key is None:
-        raise RuntimeError("analyzer.init(api_key) must be called before analyze()")
+    """Single-pass detailed digest.
 
-    blocks = {label: msgs for label, msgs in _split_into_blocks(messages).items() if msgs}
+    Returns (digest_text, useful_count). useful_count = original message count since the
+    pipeline no longer pre-filters; the LLM decides itself what's noteworthy.
+    """
+    if _api_key is None or _base_url is None or _model is None:
+        raise RuntimeError("analyzer.init(...) must be called before analyze()")
 
-    if not blocks:
+    if not messages:
         return ("💤 За период ничего важного не произошло", 0)
 
-    blocks = _merge_to_max_blocks(blocks, MAX_BLOCKS)
-    logger.info(f"Stage 2: {len(blocks)} blocks after merging")
+    total = len(messages)
+    full_log = _format_messages(messages)
 
-    client = AsyncGroq(api_key=_groq_api_key)
-
-    # --- Stage 2: AI rough filter ---
-    filtered_lines: list[str] = []
-    call_count = 0
-
-    for label in sorted(blocks):
-        block_text = _format_messages(blocks[label])
-        chunks = _split_text_into_chunks(block_text, MAX_BLOCK_CHARS)
-
-        for chunk in chunks:
-            if call_count > 0:
-                await asyncio.sleep(BLOCK_DELAY)
-
-            logger.info(f"Stage 2: block {label} — {len(chunk)} chars")
-
-            try:
-                response = await client.chat.completions.create(
-                    model="meta-llama/llama-4-scout-17b-16e-instruct",
-                    max_tokens=400,
-                    temperature=0.1,
-                    timeout=API_TIMEOUT,
-                    messages=[
-                        {"role": "system", "content": FILTER_PROMPT},
-                        {"role": "user", "content": chunk},
-                    ],
-                )
-                result = response.choices[0].message.content.strip()
-                call_count += 1
-            except Exception as e:
-                err = str(e).lower()
-                if "429" in err or "503" in err or "rate" in err or "unavailable" in err:
-                    logger.warning(f"Stage 2: rate limited on block {label}, waiting {RETRY_DELAY}s")
-                    await asyncio.sleep(RETRY_DELAY)
-                    try:
-                        response = await client.chat.completions.create(
-                            model="meta-llama/llama-4-scout-17b-16e-instruct",
-                            max_tokens=400,
-                            temperature=0.1,
-                            timeout=API_TIMEOUT,
-                            messages=[
-                                {"role": "system", "content": FILTER_PROMPT},
-                                {"role": "user", "content": chunk},
-                            ],
-                        )
-                        result = response.choices[0].message.content.strip()
-                        call_count += 1
-                    except Exception:
-                        logger.exception(f"Stage 2 retry failed for block {label}, skipping")
-                        call_count += 1
-                        continue
-                else:
-                    logger.exception(f"Stage 2 failed for block {label}, skipping")
-                    call_count += 1
-                    continue
-
-            if result.upper() == "ПУСТО":
-                logger.info(f"Stage 2: block {label} — nothing useful")
-                continue
-
-            filtered_lines.append(result)
-
-    after_stage2 = sum(_count_lines(chunk) for chunk in filtered_lines)
-    logger.info(f"Stage 2 complete: {after_stage2} lines kept from {len(messages)} original messages")
-
-    if not filtered_lines:
-        return ("💤 За период ничего важного не произошло", 0)
-
-    # --- Stage 2.5: Compress filtered content for weekly digests ---
-    combined = "\n\n".join(filtered_lines)
-    if weekly and len(combined) > STAGE25_THRESHOLD:
-        logger.info(f"Stage 2.5: {len(combined)} chars exceeds {STAGE25_THRESHOLD}, compressing")
-        compress_chunks = _split_text_into_chunks(combined, STAGE25_CHUNK)
-        compressed_lines: list[str] = []
-
-        for i, chunk in enumerate(compress_chunks):
-            if i > 0:
-                await asyncio.sleep(BLOCK_DELAY)
-
-            logger.info(f"Stage 2.5: chunk {i + 1}/{len(compress_chunks)} — {len(chunk)} chars")
-            try:
-                response = await client.chat.completions.create(
-                    model="meta-llama/llama-4-scout-17b-16e-instruct",
-                    max_tokens=300,
-                    temperature=0.1,
-                    timeout=API_TIMEOUT,
-                    messages=[
-                        {"role": "system", "content": COMPRESS_PROMPT},
-                        {"role": "user", "content": chunk},
-                    ],
-                )
-                result = response.choices[0].message.content.strip()
-                if result.upper() != "ПУСТО":
-                    compressed_lines.append(result)
-            except Exception:
-                logger.exception(f"Stage 2.5 failed for chunk {i + 1}, keeping original")
-                compressed_lines.append(chunk)
-
-        combined = "\n\n".join(compressed_lines)
-        logger.info(f"Stage 2.5 complete: {len(combined)} chars after compression")
-
-    # --- Stage 3: Final analysis ---
     if custom_prompt:
-        stage3_prompt = custom_prompt
+        system_prompt = custom_prompt
     elif weekly:
-        stage3_prompt = WEEKLY_PROMPT
+        system_prompt = WEEKLY_PROMPT
     else:
-        stage3_prompt = FINAL_PROMPT
-    logger.info(f"Stage 3: {len(combined)} chars of filtered content (weekly={weekly}, custom={custom_prompt is not None})")
+        system_prompt = DETAILED_PROMPT
 
-    await asyncio.sleep(STAGE3_DELAY)
+    client = AsyncOpenAI(
+        api_key=_api_key,
+        base_url=_base_url,
+        timeout=API_TIMEOUT,
+        max_retries=0,  # we handle retries ourselves in _call_llm
+    )
 
-    stage3_messages = [
-        {"role": "system", "content": stage3_prompt},
-        {"role": "user", "content": f"Проанализируй следующие отфильтрованные сообщения и составь дайджест:\n\n{combined}"},
-    ]
+    pieces = _split_text_into_chunks(full_log, INPUT_CHUNK_CHARS)
+    logger.info(
+        "analyzer: provider=%s model=%s msgs=%d chars=%d pieces=%d weekly=%s custom=%s",
+        _provider,
+        _model,
+        total,
+        len(full_log),
+        len(pieces),
+        weekly,
+        custom_prompt is not None,
+    )
 
-    async def _stage3_call():
-        return await client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            max_tokens=1500,
-            temperature=0.3,
-            timeout=API_TIMEOUT,
-            messages=stage3_messages,
-        )
+    if len(pieces) == 1:
+        digest = await _call_llm(client, system_prompt, pieces[0])
+        if digest is None:
+            return ("⚠️ Ошибка при генерации дайджеста", total)
+        return (digest, total)
 
-    try:
-        response = await _stage3_call()
-        digest = response.choices[0].message.content
-        logger.info("Stage 3 complete")
-    except Exception as e:
-        err = str(e).lower()
-        if "429" in err or "503" in err or "rate" in err or "unavailable" in err:
-            logger.warning(f"Stage 3: rate limited or unavailable, waiting {RETRY_DELAY}s")
-            await asyncio.sleep(RETRY_DELAY)
-            try:
-                response = await _stage3_call()
-                digest = response.choices[0].message.content
-                logger.info("Stage 3 complete after retry")
-            except Exception:
-                logger.exception("Stage 3 retry failed")
-                return ("⚠️ Ошибка при финальном анализе", after_stage2)
-        else:
-            logger.exception("Stage 3 failed")
-            return ("⚠️ Ошибка при финальном анализе", after_stage2)
+    partials: list[str] = []
+    for i, piece in enumerate(pieces, 1):
+        logger.info("analyzer: piece %d/%d (%d chars)", i, len(pieces), len(piece))
+        out = await _call_llm(client, system_prompt, piece)
+        if out:
+            partials.append(out.strip())
 
-    return (digest, after_stage2)
+    if not partials:
+        return ("⚠️ Ошибка при генерации дайджеста", total)
+    if len(partials) == 1:
+        return (partials[0], total)
+
+    merge_prompt = (
+        system_prompt
+        + "\n\nНиже даны несколько готовых частей дайджеста по одному и тому же периоду. "
+        "Объедини их в один цельный дайджест, сохраняя ВСЮ важную информацию, объединяя дубли, "
+        "сохраняя метки времени и сохраняя структуру секций."
+    )
+    merge_input = "\n\n---\n\n".join(partials)
+    merged = await _call_llm(client, merge_prompt, merge_input)
+    if merged is None:
+        return ("\n\n".join(partials), total)
+    return (merged, total)

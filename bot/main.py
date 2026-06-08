@@ -184,7 +184,19 @@ async def _migrate_legacy_env(admin_user_id: int) -> None:
 async def main() -> None:
     setup_logging()
     config = Config.from_env()
-    analyzer.init(config.groq_api_key)
+    analyzer.init(
+        provider=config.llm_provider,
+        api_key=config.llm_api_key,
+        base_url=config.llm_base_url,
+        model=config.llm_model,
+        label=config.llm_label,
+    )
+    logger.info(
+        "LLM provider=%s model=%s base_url=%s",
+        config.llm_provider,
+        config.llm_model,
+        config.llm_base_url,
+    )
 
     await init_db()
     logger.info("Database initialized")
@@ -210,6 +222,7 @@ async def main() -> None:
         db_factory=get_session,
         manager=userbot.manager,
         bot=application.bot,
+        config=config,
     )
     await scheduler_mod.scheduler.start()
 

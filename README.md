@@ -6,7 +6,7 @@
 
 - Парсит Telegram-чаты от имени реального аккаунта пользователя (через Telethon)
 - Поддерживает **несколько аккаунтов на пользователя** — каждый чат привязан к конкретному аккаунту
-- Анализирует сообщения через AI (Groq, Llama 4 Scout)
+- Анализирует сообщения через AI — на выбор **Xiaomi MiMo** (рекомендуется, 82M токенов в token-plan) или **Groq** (legacy). Подробный дайджест с секцией «📖 Подробнее», где LLM раскрывает технические темы как мини-инструкции с командами и примерами кода.
 - Отправляет структурированный дайджест в указанный топик группы или в личные сообщения
 - Поддерживает несколько пользователей одновременно — данные изолированы
 - **Per-chat ключевые слова** для алертов в реальном времени
@@ -19,7 +19,7 @@
 git clone <repo-url>
 cd telegram-digest
 cp .env.example .env
-# заполнить .env: BOT_TOKEN, ADMIN_USER_ID, GROQ_API_KEY, POSTGRES_PASSWORD
+# заполнить .env: BOT_TOKEN, ADMIN_USER_ID, MIMO_API_KEY (или GROQ_API_KEY), POSTGRES_PASSWORD
 docker compose up -d
 ```
 
@@ -31,10 +31,24 @@ PostgreSQL стартует первым (healthcheck `pg_isready`), бот жд
 |---|---|
 | `BOT_TOKEN` | [@BotFather](https://t.me/BotFather) |
 | `ADMIN_USER_ID` | свой numeric Telegram ID — узнать через [@userinfobot](https://t.me/userinfobot) |
-| `GROQ_API_KEY` | [console.groq.com](https://console.groq.com/keys), бесплатный тариф |
+| `MIMO_API_KEY` | [platform.xiaomimimo.com](https://platform.xiaomimimo.com) — рекомендуется, 82M токенов в token-plan |
+| `GROQ_API_KEY` | [console.groq.com](https://console.groq.com/keys), бесплатный тариф (legacy) |
 | `POSTGRES_PASSWORD` | пароль для БД |
 | `DATABASE_URL` | по умолчанию `postgresql+asyncpg://digest:password@postgres:5432/digest_bot` |
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | общие credentials для всех пользователей |
+
+#### Выбор LLM-провайдера
+
+Раскомментируй **ровно один** ключ в `.env`:
+
+- Оба ключа заданы одновременно → бот стартанёт с ошибкой `"Both GROQ_API_KEY and MIMO_API_KEY are set"`.
+- Оба ключа пусты/закомментированы → `"No LLM provider configured"`.
+
+Опционально можно переопределить:
+- `MIMO_BASE_URL` (default `https://token-plan-sgp.xiaomimimo.com/v1`), `MIMO_MODEL` (default `mimo-v2.5-pro`).
+- `GROQ_BASE_URL` (default `https://api.groq.com/openai/v1`), `GROQ_MODEL` (default `meta-llama/llama-4-scout-17b-16e-instruct`).
+
+Доки Mimo: <https://platform.xiaomimimo.com/docs/en-US/api/chat/openai-api>
 
 ## Первый запуск
 
@@ -113,26 +127,36 @@ PostgreSQL стартует первым (healthcheck `pg_isready`), бот жд
 ```
 📋 Дайджест • Bedolaga БС
 📅 12 мая 2026 • 09:15 – 16:42 МСК
-💬 Проанализировано: 87
+💬 Проанализировано сообщений: 87
 📊 Вчера: 64 → сегодня: 87 (▲ +23)
-🔍 Обработано: 87 → 87 → 32
+🤖 LLM: Xiaomi MiMo
 ━━━━━━━━━━━━━━━━━━━━━━
 
-📌 Резюме: [одно предложение — главное за период]
+📌 *Резюме*
+[1-3 предложения, главное за период]
 
 ## 🔴 Важное
-…
+[критические события — развёрнуто, 2-4 предложения на пункт]
 
 ## 🟡 Обновления
-…
+[новости, релизы, изменения — развёрнуто, с версиями/датами]
 
 ## 🔵 Полезно
-…
+[советы, решения, выводы — раскрывается СУТЬ]
+
+## 📖 Подробнее
+### {Тема}
+- **Что это:** …
+- **Зачем нужно:** …
+- **Как использовать:** команды, мини-пример в ``` ``` ```, ссылки на доки
+- **На что обратить внимание:** подводные камни
 ```
 
 Если закреп изменился — перед дайджестом приходит "📌 Закреп обновлён" + сам закреп через userbot.
 
-Default Stage 3 prompt универсальный (подходит любому чату); опционально можно задать `custom_prompt` для конкретного чата.
+Дайджест отправляется с `parse_mode=Markdown`; если LLM выдала битый Markdown (несбалансированные `*`/`_`), sender падает в plain-text режим, чтобы сообщение всё равно дошло.
+
+Default prompt универсальный, на каждое сообщение модель сама решает «расписать или пропустить»; опциональный per-chat `custom_prompt` полностью заменяет system prompt (можно выкинуть структуру совсем).
 
 ## Для администратора
 
@@ -153,7 +177,7 @@ Default Stage 3 prompt универсальный (подходит любому
 - `bot/main.py` — entry point: poll, scheduler, alerters, миграция legacy env, error handler.
 - `bot/userbot/manager.py` — `UserbotManager`: N Telethon-клиентов по `session_id`, `keep_alive`.
 - `bot/scheduler.py` — `DigestScheduler`: daily + Monday weekly cron на каждый активный чат + on-demand.
-- `bot/analyzer.py` — Groq API: 3 стадии (фильтр → сжатие → дайджест), generic prompts.
+- `bot/analyzer.py` — OpenAI-compatible API (Mimo/Groq) одним проходом; подробный prompt с секцией «📖 Подробнее».
 - `bot/db/` — SQLAlchemy 2.0 async + asyncpg, PostgreSQL 16.
 - `bot/handlers/` — python-telegram-bot v20+, **только inline** клавиатуры.
 - `bot/keyboards.py` — все клавиатуры через `InlineKeyboardMarkup`.
@@ -167,4 +191,4 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-130+ юнит-тестов: атомарная запись, анализатор, scheduler-утилиты, alerter (per-chat keywords, IP, debounce), клавиатуры (gating, multi-account), модели, конфиг. Внешние сервисы (Telegram, Groq, PostgreSQL) не вызываются.
+Юнит-тесты: атомарная запись, анализатор (helpers + smoke), scheduler-утилиты, alerter (per-chat keywords, IP, debounce), клавиатуры (gating, multi-account), модели, конфиг (включая dual-provider validation). Внешние сервисы (Telegram, LLM-провайдеры, PostgreSQL) не вызываются.

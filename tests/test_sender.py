@@ -43,8 +43,6 @@ def test_build_header_basic():
     out = _build_header(
         chat_name="MyChat",
         total_count=100,
-        s1_count=120,
-        s2_count=80,
         yesterday_count=None,
         period="24h",
         start_time="10:00",
@@ -58,28 +56,59 @@ def test_build_header_weekly_format():
     out = _build_header(
         chat_name="MyChat",
         total_count=500,
-        s1_count=600,
-        s2_count=400,
         yesterday_count=None,
         period="7d",
         start_time="00:00",
         end_time="23:59",
     )
-    # weekly period label appears somewhere in the formatted output
     assert "MyChat" in out
 
 
 def test_build_header_diff_arrows_up():
     up = _build_header(
-        chat_name="X", total_count=100, s1_count=110, s2_count=80,
-        yesterday_count=50, period="24h", start_time="00:00", end_time="00:00",
+        chat_name="X",
+        total_count=100,
+        yesterday_count=50,
+        period="24h",
+        start_time="00:00",
+        end_time="00:00",
     )
     assert "▲" in up
 
 
 def test_build_header_diff_arrows_down():
     down = _build_header(
-        chat_name="X", total_count=30, s1_count=35, s2_count=20,
-        yesterday_count=50, period="24h", start_time="00:00", end_time="00:00",
+        chat_name="X",
+        total_count=30,
+        yesterday_count=50,
+        period="24h",
+        start_time="00:00",
+        end_time="00:00",
     )
     assert "▼" in down
+
+
+def test_build_header_includes_llm_label():
+    out = _build_header(
+        chat_name="X",
+        total_count=10,
+        yesterday_count=None,
+        period="24h",
+        start_time="00:00",
+        end_time="01:00",
+        llm_label="Xiaomi MiMo",
+    )
+    assert "Xiaomi MiMo" in out
+    assert "🤖" in out
+
+
+def test_build_header_omits_llm_label_when_none():
+    out = _build_header(
+        chat_name="X",
+        total_count=10,
+        yesterday_count=None,
+        period="24h",
+        start_time="00:00",
+        end_time="01:00",
+    )
+    assert "🤖" not in out

@@ -10,6 +10,7 @@ from telegram import Bot
 from telethon.errors import FloodWaitError
 
 from bot import analyzer
+from bot.config import Config
 from bot.db import crud
 from bot.db.models import Chat
 from bot.sender import send_digest, send_empty_notice, send_error
@@ -42,10 +43,17 @@ def _period_label(lookback_hours: int) -> str:
 
 
 class DigestScheduler:
-    def __init__(self, db_factory: SessionFactory, manager: UserbotManager, bot: Bot):
+    def __init__(
+        self,
+        db_factory: SessionFactory,
+        manager: UserbotManager,
+        bot: Bot,
+        config: Config | None = None,
+    ):
         self.db_factory = db_factory
         self.manager = manager
         self.bot = bot
+        self.config = config
         self._scheduler = AsyncIOScheduler(timezone=MSK)
 
     async def start(self) -> None:
@@ -229,6 +237,8 @@ class DigestScheduler:
         start_time = messages[0]["time"]
         end_time = messages[-1]["time"]
 
+        llm_label = self.config.llm_label if self.config else None
+
         try:
             await send_digest(
                 bot=self.bot,
@@ -237,12 +247,11 @@ class DigestScheduler:
                 chat_name=chat.name,
                 digest_text=digest_text,
                 total_count=total,
-                s1_count=s1_count,
-                s2_count=s2_count,
                 yesterday_count=yesterday_count,
                 period=period_label,
                 start_time=start_time,
                 end_time=end_time,
+                llm_label=llm_label,
             )
         except Exception:
             logger.exception(f"run_digest: send failed for chat {chat_id}")
